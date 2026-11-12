@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.5.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.6.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.6:** the **Streams UI component library**: web components (`<stream-list>`, `<stream-calendar>`, `<stream-map>`…) that show streams on any website as HTML. See §15a and [UI.md](UI.md).
+>
 > **New in 0.5:** **map pin** (`geopoint`) and **date** field types with map filters, nine new **templates** with schema.org types, **standard output formats** (iCalendar, RSS, JSON Feed, GeoJSON, CSV), `populate` for **media** fields, and **CORS** so websites can call the API from a browser.
 >
 > **New in 0.4:** **relations** between streams with `?populate`, **per-stream API keys** with scopes, and **scheduled publishing and unpublishing** (`publishAt` / `unpublishAt`). All 0.3 requests still work unchanged.
@@ -551,6 +553,7 @@ npm start -- --token=… --cors=https://www.example.com,http://localhost:5173
 - **Other origins** get no CORS headers, so browsers block their requests.
 - CORS does not replace authentication. Writes still need a token or key, and you should **never put the main token in website code**. For browser writes, use a stream key with only the scopes it needs.
 - `GET /api/config` returns the configured `corsOrigins`.
+- The component library under `/ui/` is public static code and is always served with `Access-Control-Allow-Origin: *`, so any website can load it. Only the API is restricted by this setting.
 
 ## 12. Per-stream API keys
 
@@ -626,6 +629,21 @@ POST /api/streams/orders/keys
 The selected stream and tab are kept in the URL (`/streams.html?stream=blog&tab=settings`).
 
 ---
+
+## 15a. Streams UI (component library)
+
+`/ui/streams-ui.js` is an ES module that registers custom elements for showing streams as HTML on any website. It has no dependencies, except the bundled Leaflet 1.9.4 for maps:
+
+`<stream-list>`, `<stream-cards>`, `<stream-carousel>`, `<stream-calendar>`, `<stream-timeline>`, `<stream-table>`, `<stream-map>`, `<stream-gallery>`, `<stream-item>`, `<stream-next>`, `<stream-filter>`, `<stream-banner>`.
+
+- **Data:** each element reads `src` (a stream URL) and requests `GET …/items` with `populate=*`. Only published items are shown, unless a `read` key is given. `live` subscribes to `…/subscribe`.
+- **Field roles:** the title, dates, image, body, location and tags are detected from field names and types, the same way as for the standard formats (§10). Attributes such as `date-field="kickoff"` override them.
+- **Styling:** CSS variables (`--sui-*`), `::part()`, an `unstyled` light-DOM mode with `sui-*` classes, `<template>` bindings (`data-field`, `data-html`, `data-src`, `data-href`, `data-date`, `data-if`, `data-each`), or a `renderItem` function.
+- **Safety:** text is always inserted as text. Markdown goes through a sanitizing renderer: HTML is escaped, and only `http(s)`, `mailto`, `tel` and relative URLs are allowed.
+- **Search engines:** `jsonld` adds schema.org JSON-LD based on the stream's `schemaType`.
+- **Demo:** `/ui/demo.html` shows every component and its code. Run `npm run seed:demo` first to create the demo streams.
+
+The full reference is in [UI.md](UI.md).
 
 ## 16. Storage & operations
 

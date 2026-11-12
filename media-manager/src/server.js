@@ -432,7 +432,11 @@ export async function createApp(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       const path = req.url.split('?')[0];
-      if ((path.startsWith('/api/') || path.startsWith('/uploads/') || path.startsWith('/ui/')) && applyCors(req, res)) return;
+      if (path.startsWith('/ui/')) {
+        // The component library is public static code. Module scripts are always fetched with CORS,
+        // so any website may load it, whatever the API's CORS setting.
+        res.setHeader('Access-Control-Allow-Origin', '*');
+      } else if ((path.startsWith('/api/') || path.startsWith('/uploads/')) && applyCors(req, res)) return;
       await route(req, res);
     } catch (err) {
       const status = err.status || 500;

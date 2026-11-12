@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streams UI demo</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234945ff'/><path d='M7 10h18M7 16h18M7 22h12' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>">
+  <script type="module" src="/ui/streams-ui.js"></script>
+  <style>
+    :root { --bg: #f7f7fb; --text: #1f2330; --muted: #5d6273; --border: #e3e5ec; --card: #fff; --accent: #4945ff; color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+    header.page { background: #14142b; color: #fff; padding: 48px 24px 40px; }
+    header.page h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 40px); }
+    header.page p { margin: 0; color: #c9c9e8; max-width: 760px; }
+    header.page code { background: rgba(255,255,255,.12); padding: 2px 6px; border-radius: 4px; }
+    nav.toc { position: sticky; top: 0; z-index: 10; background: rgba(247,247,251,.95); backdrop-filter: blur(6px); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; gap: 6px; flex-wrap: wrap; }
+    nav.toc a { font-size: 13px; text-decoration: none; color: var(--muted); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: #fff; }
+    nav.toc a:hover { color: var(--accent); border-color: var(--accent); }
+    main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    section.demo { margin: 0 0 48px; }
+    section.demo h2 { margin: 0 0 4px; font-size: 22px; }
+    section.demo > p { margin: 0 0 16px; color: var(--muted); }
+    .live { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    details.code { margin-top: 10px; }
+    details.code summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+    details.code pre { margin: 8px 0 0; background: #14142b; color: #e7e7f5; padding: 14px 16px; border-radius: 10px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+    .note { background: #fff8e1; border: 1px solid #f3e1a6; padding: 12px 16px; border-radius: 10px; color: #5c4700; margin-bottom: 24px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+
+    /* Styling examples used below */
+    .brand-cards { --sui-accent: #d6336c; --sui-radius: 16px; --sui-card-min: 220px; --sui-font: Georgia, serif; --sui-image-ratio: 4 / 3; }
+    .dark-panel { background: #15151f; border-radius: 12px; padding: 20px; }
+    .parts-demo::part(item) { border-left: 4px solid #12b886; padding-left: 12px; }
+    .parts-demo::part(title) { text-transform: uppercase; letter-spacing: .04em; font-size: 15px; }
+    .parts-demo::part(date) { color: #12b886; font-weight: 700; }
+    .site-list .sui-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+    .site-list .sui-item { display: flex; gap: 12px; align-items: center; padding: 10px; border: 2px dashed #adb5bd; border-radius: 8px; }
+    .site-list .sui-image { width: 64px; height: 64px; object-fit: cover; border-radius: 50%; }
+    .site-list .sui-title { margin: 0; font-size: 16px; }
+    .site-list .sui-description, .site-list .sui-tags, .site-list .sui-date { display: none; }
+    .team-grid .sui-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+    .team-card { text-align: center; padding: 16px; border: 1px solid var(--border); border-radius: 12px; height: 100%; }
+    .team-card img { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; margin: 0 auto 10px; display: block; }
+    .team-card h3 { margin: 0; font-size: 17px; }
+    .team-card .role { color: var(--muted); font-size: 14px; margin: 2px 0 8px; }
+    .team-card .bio { font-size: 14px; }
+    .faq details { border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; background: #fff; }
+    .faq summary { font-weight: 650; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header class="page">
+    <h1>Streams UI</h1>
+    <p>Web components that turn Media Manager streams into HTML. Every example below is live: it reads the demo streams from this server. Open “Show code” to copy an example. Put <code>&lt;script type="module" src="…/ui/streams-ui.js"&gt;&lt;/script&gt;</code> once in your page, then use the elements.</p>
+  </header>
+  <nav class="toc" id="toc" aria-label="Examples"></nav>
+  <main>
+    <p class="note" id="seedNote" hidden>The demo streams are missing. Start the server, then enter <code>npm run seed:demo</code> and refresh this page.</p>
+
+    <section class="demo" id="banner"><h2>Banner</h2><p>The latest announcement. Rotates and can be dismissed.</p>
+      <template><stream-banner src="/api/streams/demo-announcements" rotate="6000" dismissible></stream-banner></template></section>
+
+    <section class="demo" id="list"><h2>List</h2><p>A vertical list with images, dates and tags. Links use your own URL pattern.</p>
+      <template><stream-list src="/api/streams/demo-blog" limit="3" link="/blog/{slug}" more="Load more" divided></stream-list></template></section>
+
+    <section class="demo" id="horizontal"><h2>Horizontal list</h2><p><code>layout="horizontal"</code> scrolls sideways and snaps to each item.</p>
+      <template><stream-list src="/api/streams/demo-events" layout="horizontal" sort="data.start:asc" filter="filter[tags][ne]=company"></stream-list></template></section>
+
+    <section class="demo" id="cards"><h2>Cards</h2><p>A responsive grid. This one uses CSS variables for brand colours, radius and font.</p>
+      <template><stream-cards class="brand-cards" src="/api/streams/demo-blog" limit="6" link="/blog/{slug}"></stream-cards></template></section>
+
+    <section class="demo" id="filter"><h2>Tag filter</h2><p><code>&lt;stream-filter&gt;</code> reads the tags of another component's stream and filters it.</p>
+      <template><stream-filter for="filtered-posts" field="tags"></stream-filter>
+<br>
+<stream-list id="filtered-posts" src="/api/streams/demo-blog" limit="10" compact></stream-list></template></section>
+
+    <section class="demo" id="carousel"><h2>Carousel</h2><p>Testimonials, two per view, with autoplay that pauses on hover and respects reduced motion.</p>
+      <template><stream-carousel src="/api/streams/demo-testimonials" per-view="2" autoplay="5000"></stream-carousel></template></section>
+
+    <section class="demo" id="calendar"><h2>Calendar</h2><p>Month, week and agenda views. Colours come from the first tag. On narrow screens the month view becomes an agenda.</p>
+      <template><stream-calendar src="/api/streams/demo-events" color-field="tags" live></stream-calendar></template></section>
+
+    <section class="demo" id="next"><h2>Next up</h2><p>The next upcoming event, with a countdown.</p>
+      <template><stream-next src="/api/streams/demo-events" countdown></stream-next></template></section>
+
+    <section class="demo" id="timeline"><h2>Timeline</h2><p>Blog posts by month. Add <code>alternate</code> for a zig-zag layout on wide screens.</p>
+      <template><stream-timeline src="/api/streams/demo-blog" group="month" alternate compact></stream-timeline></template></section>
+
+    <section class="demo" id="table"><h2>Table</h2><p>Sortable columns and a search box.</p>
+      <template><stream-table src="/api/streams/demo-events" columns="title,start,venue,tags" searchable sort="data.start:asc"></stream-table></template></section>
+
+    <section class="demo" id="map"><h2>Map</h2><p>Every item with a map pin. Click a pin for details.</p>
+      <template><stream-map src="/api/streams/demo-events" height="420"></stream-map></template></section>
+
+    <section class="demo" id="gallery"><h2>Gallery</h2><p>Images from a stream, with a keyboard-friendly lightbox.</p>
+      <template><stream-gallery src="/api/streams/demo-blog" captions></stream-gallery></template></section>
+
+    <section class="demo" id="item"><h2>Single item</h2><p>One post, looked up by its slug, with the Markdown body rendered and structured data for search engines.</p>
+      <template><stream-item src="/api/streams/demo-blog" slug="introducing-the-streams-component-library" heading="2" jsonld></stream-item></template></section>
+
+    <section class="demo" id="theme"><h2>Dark theme</h2><p><code>theme="dark"</code>, or <code>theme="auto"</code> to follow the visitor's system setting.</p>
+      <template><div class="dark-panel">
+  <stream-list src="/api/streams/demo-events" theme="dark" limit="3" sort="data.start:asc" compact></stream-list>
+</div></template></section>
+
+    <section class="demo" id="parts"><h2>Style with ::part()</h2><p>Target named pieces of the component from your own CSS.</p>
+      <template><style>
+  .parts-demo::part(item) { border-left: 4px solid #12b886; padding-left: 12px; }
+  .parts-demo::part(title) { text-transform: uppercase; }
+  .parts-demo::part(date) { color: #12b886; font-weight: 700; }
+</style>
+<stream-list class="parts-demo" src="/api/streams/demo-events" limit="3" compact></stream-list></template></section>
+
+    <section class="demo" id="unstyled"><h2>Unstyled (your own CSS)</h2><p><code>unstyled</code> renders plain markup with <code>sui-*</code> classes and no built-in styles, so your site's CSS applies.</p>
+      <template><stream-list class="site-list" src="/api/streams/demo-team" unstyled sort="data.order:asc"></stream-list></template></section>
+
+    <section class="demo" id="template"><h2>Your own markup</h2><p>Put a <code>&lt;template&gt;</code> inside the element. With <code>unstyled</code>, your page's CSS styles the result (here: <code>.team-grid .sui-cards</code> and <code>.team-card</code>). <code>data-field</code>, <code>data-html</code> (Markdown), <code>data-src</code>, <code>data-href</code>, <code>data-date</code>, <code>data-if</code> and <code>data-each</code> fill it in.</p>
+      <template><stream-cards class="team-grid" src="/api/streams/demo-team" unstyled sort="data.order:asc">
+  <template>
+    <div class="team-card">
+      <img data-src="photo" data-if="photo">
+      <h3 data-field="name"></h3>
+      <p class="role" data-field="jobTitle"></p>
+      <div class="bio" data-html="bio"></div>
+    </div>
+  </template>
+</stream-cards></template></section>
+
+    <section class="demo" id="faq"><h2>FAQ with &lt;details&gt;</h2><p>A template turns a FAQ stream into an accordion.</p>
+      <template><stream-list class="faq" src="/api/streams/demo-faq" sort="data.order:asc" jsonld unstyled>
+  <template>
+    <details>
+      <summary data-field="question"></summary>
+      <div data-html="answer"></div>
+    </details>
+  </template>
+</stream-list></template></section>
+
+    <section class="demo" id="renderitem"><h2>JavaScript rendering</h2><p>Set <code>renderItem</code> for full control. Escape values with the helper you get.</p>
+      <template><stream-list id="js-list" src="/api/streams/demo-locations"></stream-list>
+<script type="module">
+  const list = document.getElementById('js-list');
+  list.renderItem = (item, { info, escapeHtml }) =>
+    `<p>📍 <strong>${escapeHtml(info.title)}</strong> — ${escapeHtml(item.data.openingHours || 'by appointment')}</p>`;
+</script></template></section>
+  </main>
+
+  <script type="module">
+    // Renders each example from its <template> and shows the same markup as code.
+    const toc = document.getElementById('toc');
+    for (const section of document.querySelectorAll('section.demo')) {
+      const tpl = section.querySelector(':scope > template');
+      const live = document.createElement('div');
+      live.className = 'live';
+      // Scripts in templates don't run when cloned, so re-create them.
+      live.append(tpl.content.cloneNode(true));
+      for (const old of live.querySelectorAll('script')) {
+        const s = document.createElement('script');
+        s.type = old.type;
+        s.textContent = old.textContent;
+        old.replaceWith(s);
+      }
+      const code = document.createElement('details');
+      code.className = 'code';
+      const pre = document.createElement('pre');
+      pre.textContent = tpl.innerHTML.trim();
+      code.append(Object.assign(document.createElement('summary'), { textContent: 'Show code' }), pre);
+      tpl.after(live, code);
+      const a = document.createElement('a');
+      a.href = `#${section.id}`;
+      a.textContent = section.querySelector('h2').textContent;
+      toc.append(a);
+    }
+    fetch('/api/streams/demo-blog').then((r) => { if (!r.ok) document.getElementById('seedNote').hidden = false; });
+  </script>
+</body>
+</html>

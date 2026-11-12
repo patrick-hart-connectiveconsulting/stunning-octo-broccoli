@@ -1,8 +1,8 @@
 {
   "name": "media-manager",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
-  "description": "A lightweight, dependency-free media library and data streams API (events, posts, products…) inspired by Strapi",
+  "description": "A lightweight, dependency-free media library and data streams API (events, posts, products\u2026) inspired by Strapi",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
@@ -10,7 +10,9 @@
     "start:local": "node src/server.js --token=dev-token",
     "dev": "node --watch src/server.js",
     "dev:local": "node --watch src/server.js --token=dev-token",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "test:browser": "node test/browser/components.test.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

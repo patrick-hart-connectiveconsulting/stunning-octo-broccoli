@@ -33,9 +33,9 @@ For a full description of all functions and API endpoints, see [SPEC.md](SPEC.md
 | Node.js | Version 22 (LTS) is recommended. Version 20 is the minimum (see the note below). |
 | npm | The version that comes with Node.js |
 | Operating system | macOS, Linux or Windows |
-| Shell | For the commands in this guide, use `bash` or `zsh`. On Windows, use Git Bash or WSL. |
+| Terminal | Sections 1–6 and 9: any terminal (Terminal on macOS, a Linux shell, PowerShell or Command Prompt on Windows). Step 6.7 and sections 7–8: `bash` or `zsh`. On Windows, use Git Bash or WSL for these steps. |
 | Browser | A current version of Chrome, Edge, Firefox or Safari |
-| `curl` | Necessary for sections 7 and 8 only. macOS, Linux and Git Bash include `curl`. |
+| `curl` | Necessary for sections 7 and 8 only. macOS, Linux, Git Bash and Windows 10 or later include `curl`. |
 
 You do not need a database. You do not need Docker. Media Manager has **no npm dependencies**, so you do not need `npm install`.
 
@@ -77,22 +77,44 @@ All commands in this guide start in the `media-manager` folder.
 
 The API token protects all changes to the data. Use a token, also on your own computer. Then the server operates the same as in production.
 
-1. Start the server with a token:
+1. Open a terminal.
+2. Go to the `media-manager` folder (section 2, step 2).
+3. Enter this command. It operates in all terminals, also in PowerShell and Command Prompt:
 
    ```bash
-   MEDIA_API_TOKEN=dev-token npm start
+   npm run start:local
    ```
 
-2. Make sure that the terminal shows these lines:
+   This command starts the server with the token `dev-token`.
+
+4. Make sure that the terminal shows these lines:
 
    ```
    Media manager running at http://localhost:1338
    API token required for write operations.
    ```
 
-3. Keep this terminal open. The server stops when you close the terminal.
+5. Keep this terminal open. The server stops when you close the terminal.
 
-You can use a different value for the token. This guide uses `dev-token` in all examples.
+This guide uses `dev-token` in all examples.
+
+#### Use a different token
+
+To use a different token, give it with the `--token` option. Type `--` before the option:
+
+```bash
+npm start -- --token=my-secret-token
+```
+
+You can also set the token in the environment variable `MEDIA_API_TOKEN`. The command is different for each terminal:
+
+| Terminal | Command |
+| --- | --- |
+| macOS, Linux, Git Bash, WSL | `MEDIA_API_TOKEN=dev-token npm start` |
+| Windows PowerShell | `$env:MEDIA_API_TOKEN="dev-token"; npm start` |
+| Windows Command Prompt | `set MEDIA_API_TOKEN=dev-token` and then `npm start` (two commands) |
+
+> **NOTE:** In PowerShell and Command Prompt, the variable stays set until you close the terminal.
 
 ### 3.2 Start without an API token
 
@@ -111,7 +133,7 @@ The terminal shows a warning: `MEDIA_API_TOKEN not set — write API is open.`
 In development mode, the server starts again automatically when you change a file in `src/`:
 
 ```bash
-MEDIA_API_TOKEN=dev-token npm run dev
+npm run dev:local
 ```
 
 > **NOTE:** When you change a file in `public/`, you do not have to start the server again. Refresh the page in the browser.
@@ -122,13 +144,9 @@ Push **Ctrl+C** in the terminal that shows the server output.
 
 ### 3.5 Make sure that the server operates
 
-Open a second terminal. Enter this command:
+Open this address in the browser: <http://localhost:1338/api/health>
 
-```bash
-curl http://localhost:1338/api/health
-```
-
-The result must be `{"ok":true}`.
+The page must show `{"ok":true}`.
 
 ---
 
@@ -261,7 +279,7 @@ Do these steps in the given sequence. Before you start, do these two steps:
 ### 6.7 Live updates
 
 1. Click the **Posts** tab. Make sure that **Live** is selected and that the dot is green.
-2. In a terminal, make a post with the API:
+2. In a `bash` or `zsh` terminal (on Windows: Git Bash or WSL), make a post with the API:
 
    ```bash
    curl -X POST http://localhost:1338/api/streams/blog-posts/items \
@@ -275,7 +293,7 @@ Do these steps in the given sequence. Before you start, do these two steps:
 
 ## 7. Do a manual test of the API
 
-Start the server with a token (step 3.1). Use a second terminal for these commands.
+Start the server with a token (step 3.1). Use a second terminal for these commands. Use `bash` or `zsh` (on Windows: Git Bash or WSL).
 
 1. Set two shell variables. The commands that follow use them:
 
@@ -439,11 +457,13 @@ All data is in the `data/` folder:
 Git ignores this folder.
 
 1. Stop the server (step 3.4).
-2. Delete the folder:
+2. Delete the `data` folder in the `media-manager` folder. You can use the file manager, or one of these commands:
 
-   ```bash
-   rm -rf data
-   ```
+   | Terminal | Command |
+   | --- | --- |
+   | macOS, Linux, Git Bash, WSL | `rm -rf data` |
+   | Windows PowerShell | `Remove-Item -Recurse -Force data` |
+   | Windows Command Prompt | `rmdir /s /q data` |
 
 3. Start the server again (step 3.1). The server makes a new, empty `data/` folder.
 
@@ -453,17 +473,23 @@ Git ignores this folder.
 
 ## 10. Configuration
 
-Set these environment variables before the `npm start` command:
+You can set these values as environment variables (see the table in step 3.1). For `token`, `port` and `host`, you can also use an option after `npm start --`. An option has priority over the environment variable.
 
-| Variable | Default | Function |
-| --- | --- | --- |
-| `PORT` | `1338` | The port of the server |
-| `HOST` | `0.0.0.0` | The network address of the server. Use `127.0.0.1` to accept connections from your computer only. |
-| `MEDIA_API_TOKEN` | *(not set)* | The main API token. If you do not set it, all users can make changes. |
-| `MEDIA_DATA_DIR` | `media-manager/data` | The folder for the data |
-| `MEDIA_MAX_FILE_SIZE` | `52428800` (50 MB) | The maximum size of an uploaded file, in bytes |
+| Environment variable | Option | Default | Function |
+| --- | --- | --- | --- |
+| `PORT` | `--port=` | `1338` | The port of the server |
+| `HOST` | `--host=` | `0.0.0.0` | The network address of the server. Use `127.0.0.1` to accept connections from your computer only. |
+| `MEDIA_API_TOKEN` | `--token=` | *(not set)* | The main API token. If you do not set it, all users can make changes. |
+| `MEDIA_DATA_DIR` | — | `media-manager/data` | The folder for the data |
+| `MEDIA_MAX_FILE_SIZE` | — | `52428800` (50 MB) | The maximum size of an uploaded file, in bytes |
 
-Example with all variables:
+Example with options (all terminals):
+
+```bash
+npm start -- --token=dev-token --port=4100 --host=127.0.0.1
+```
+
+Example with environment variables (`bash` or `zsh`):
 
 ```bash
 PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data MEDIA_MAX_FILE_SIZE=10485760 npm start
@@ -477,7 +503,9 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 | Problem | Cause | Action |
 | --- | --- | --- |
-| `Error: listen EADDRINUSE: address already in use 0.0.0.0:1338` | A different program uses port 1338. This can be a second Media Manager server. | Stop the other program. Or start with a different port: `PORT=1339 npm start`. |
+| PowerShell shows `The term 'MEDIA_API_TOKEN=dev-token' is not recognized`, or Command Prompt shows `'MEDIA_API_TOKEN' is not recognized as an internal or external command` | The `NAME=value command` form operates in `bash` and `zsh` only. | Use `npm run start:local` (step 3.1). Or use the command for your terminal from the table in step 3.1. |
+| The terminal shows `Could not read package.json` | The terminal is not in the `media-manager` folder. | Go to the folder: `cd stunning-octo-broccoli/media-manager`. Then enter the command again. |
+| `Port 1338 is already in use` | A different program uses port 1338. This can be a second Media Manager server. | Stop the other program. Or start with a different port: `npm start -- --token=dev-token --port=1339`. |
 | On Windows, `npm test` does not find the test files | You use Node.js 20. | Install Node.js 22. Or do each test file with `node --test test/<file>`. |
 | An error such as `fetch is not defined` when you start the server or do the tests | Your Node.js version is too old. | Install Node.js 22 (section 1). |
 | The API returns `401` and "Missing or invalid API token" | The request has no token, or the token is incorrect. | Add `-H "Authorization: Bearer dev-token"`. Make sure that the value is the same as `MEDIA_API_TOKEN`. |

@@ -23,10 +23,13 @@ import { EventLog } from './event-log.js';
 import { normalizeFields, validateData, parseFilterValue, fieldJsonSchema, isEmptyValue } from './schema.js';
 import { getTemplate } from './templates.js';
 import { normalizeWebhooks, WebhookDispatcher } from './webhooks.js';
+import { toICS, toRSS, toJSONFeed, toGeoJSON, toCSV } from './formats.js';
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const MAX_BATCH = 1000;
-const FILTER_KEY = /^filter\[([A-Za-z_][A-Za-z0-9_]*)\](?:\[(eq|ne|gt|gte|lt|lte|contains|in)\])?$/;
+const FILTER_KEY = /^filter\[([A-Za-z_][A-Za-z0-9_]*)\](?:\[(eq|ne|gt|gte|lt|lte|contains|in|within|near)\])?$/;
+const SCHEMA_TYPE = /^[A-Z][A-Za-z]{1,59}$/;
+const EARTH_KM = 6371;
 const DAY = 86400000;
 const KEY_PREFIX = 'mmk_';
 export const KEY_SCOPES = ['read', 'create', 'update', 'delete'];
@@ -61,6 +64,14 @@ function normalizeLabels(input) {
   return errors.length ? { errors } : { labels: out };
 }
 
+function normalizeSchemaType(input) {
+  if (input === undefined || input === null || input === '') return { schemaType: null };
+  if (typeof input !== 'string' || !SCHEMA_TYPE.test(input)) {
+    return { errors: [{ path: 'schemaType', message: 'must be a schema.org type name such as Event or BlogPosting, or null' }] };
+  }
+  return { schemaType: input };
+}
+
 function normalizeRetention(input) {
   if (input === undefined || input === null) return { retention: { maxItems: null, maxAgeDays: null } };
   const errors = [];
@@ -83,10 +94,11 @@ function upgradeStream(stream) {
   stream.retention ??= { maxItems: null, maxAgeDays: null };
   stream.webhooks ??= [];
   stream.apiKeys ??= [];
+  stream.schemaType ??= null;
   return stream;
 }
 
-export async function createStreamsApi({ store, dataDir, isMaster, bearer, webhookOptions = {}, schedulerIntervalMs = 15000 }) {
+export async function createStreamsApi({ store, dataDir, isMaster, bearer, webhookOptions = {}, schedulerIntervalMs = 15000, publicUrl = null }) {
   const eventDir = join(dataDir, 'events');
   await mkdir(eventDir, { recursive: true });
 
@@ -567,7 +579,8 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     const l = normalizeLabels(body.labels ?? template.labels);
     const r = normalizeRetention(body.retention ?? template.retention);
     const w = normalizeWebhooks(body.webhooks);
-    collect([f, l, r, w]);
+    const t = normalizeSchemaType(body.schemaType !== undefined ? body.schemaType : template.schemaType);
+    collect([f, l, r, w, t]);
     collect([checkRelationTargets(f.fields, slug)]);
     if (body.draftAndPublish !== undefined && typeof body.draftAndPublish !== 'boolean') fail(400, 'draftAndPublish must be a boolean');
 
@@ -576,6 +589,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       name,
       description: optionalText(body.description, 'description', 1000) ?? null,
       template: templateId,
+      schemaType: t.schemaType,
       labels: l.labels,
       draftAndPublish: body.draftAndPublish ?? template.draftAndPublish,
       retention: r.retention,
@@ -605,6 +619,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     if (body.labels !== undefined) results.push(normalizeLabels(body.labels));
     if (body.retention !== undefined) results.push(normalizeRetention(body.retention));
     if (body.webhooks !== undefined) results.push(normalizeWebhooks(body.webhooks, stream.webhooks));
+    if (body.schemaType !== undefined) results.push(normalizeSchemaType(body.schemaType));
     collect(results);
     for (const r of results) Object.assign(patch, r);
     if (patch.fields) collect([checkRelationTargets(patch.fields, stream.slug)]);
@@ -762,7 +777,10 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       const [, name, op = 'eq'] = m;
       const field = byName.get(name);
       if (stream.fields.length && !field) fail(400, `Unknown field "${name}" in filter`);
-      filters.push({ name, op, raw, type: field?.type });
+      const geo = op === 'within' || op === 'near';
+      if (geo && field?.type !== 'geopoint') fail(400, `filter[${name}][${op}] only works on map pin (geopoint) fields`);
+      if (!geo && field?.type === 'geopoint') fail(400, `Map pin fields support filter[${name}][within]=minLng,minLat,maxLng,maxLat and filter[${name}][near]=lat,lng,km`);
+      filters.push({ name, op, raw, type: field?.type, geo: geo ? parseGeoFilter(op, raw, name) : null });
     }
     const compare = (v, op, raw, type) => {
       if (op === 'contains') return v != null && String(typeof v === 'object' ? JSON.stringify(v) : v).toLowerCase().includes(raw.toLowerCase());
@@ -777,8 +795,9 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       return v <= x; // lte
     };
     return (item) =>
-      filters.every(({ name, op, raw, type }) => {
+      filters.every(({ name, op, raw, type, geo }) => {
         const v = item.data?.[name];
+        if (geo) return v != null && matchGeo(geo, v);
         // Arrays (tags, multiple relations): eq / in / contains match if any element matches; ne if none does.
         if (Array.isArray(v) && type !== 'json') {
           if (op === 'ne') return !v.some((el) => compare(el, 'eq', raw, 'string'));
@@ -788,15 +807,56 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       });
   }
 
-  /** Replaces relation ids with the related items for `?populate=*` or `?populate=a,b`. */
+  function parseGeoFilter(op, raw, name) {
+    const nums = raw.split(',').map((x) => Number(x.trim()));
+    const bad = (msg) => fail(400, `filter[${name}][${op}] ${msg}`);
+    if (nums.some((n) => !Number.isFinite(n))) bad('takes comma-separated numbers');
+    if (op === 'within') {
+      if (nums.length !== 4) bad('takes minLng,minLat,maxLng,maxLat');
+      const [minLng, minLat, maxLng, maxLat] = nums;
+      if (minLat > maxLat || Math.abs(minLat) > 90 || Math.abs(maxLat) > 90 || Math.abs(minLng) > 180 || Math.abs(maxLng) > 180) bad('has an invalid box');
+      return { op, minLng, minLat, maxLng, maxLat };
+    }
+    if (nums.length !== 3) bad('takes lat,lng,km');
+    const [lat, lng, km] = nums;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || !(km > 0)) bad('needs a valid lat, lng and a distance in km greater than 0');
+    return { op, lat, lng, km };
+  }
+
+  function matchGeo(g, p) {
+    if (g.op === 'within') {
+      const inLng = g.minLng <= g.maxLng ? p.lng >= g.minLng && p.lng <= g.maxLng : p.lng >= g.minLng || p.lng <= g.maxLng; // box may cross the antimeridian
+      return inLng && p.lat >= g.minLat && p.lat <= g.maxLat;
+    }
+    const rad = Math.PI / 180;
+    const dLat = (p.lat - g.lat) * rad;
+    const dLng = (p.lng - g.lng) * rad;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(g.lat * rad) * Math.cos(p.lat * rad) * Math.sin(dLng / 2) ** 2;
+    return 2 * EARTH_KM * Math.asin(Math.min(1, Math.sqrt(a))) <= g.km;
+  }
+
+  const fileSummary = (file) => (file ? {
+    id: file.id,
+    name: file.name,
+    url: file.url,
+    mime: file.mime,
+    size: file.size,
+    width: file.width,
+    height: file.height,
+    alternativeText: file.alternativeText,
+    caption: file.caption,
+  } : null);
+
+  /** Replaces relation and media ids with the related items / file details for `?populate=*` or `?populate=a,b`. */
   function populate(req, stream, items, url) {
     const param = url.searchParams.get('populate');
     if (!param) return items;
-    const relations = stream.fields.filter((f) => f.type === 'relation');
+    const relations = stream.fields.filter((f) => f.type === 'relation' || f.type === 'media');
     const names = param === '*' ? relations.map((f) => f.name) : param.split(',').map((s) => s.trim()).filter(Boolean);
-    for (const n of names) if (!relations.some((f) => f.name === n)) fail(400, `Cannot populate "${n}": not a relation field`);
+    for (const n of names) if (!relations.some((f) => f.name === n)) fail(400, `Cannot populate "${n}": not a relation or media field`);
 
     const resolvers = relations.filter((f) => names.includes(f.name)).map((f) => {
+      if (f.type === 'media') return [f, (id) => fileSummary(store.getFile(id))];
       const target = store.data.streams.find((s) => s.slug === f.target);
       const log = target && logs.get(target.id);
       const seeDrafts = target && can(req, target, 'read');
@@ -817,11 +877,12 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     });
   }
 
-  function listItems(req, res, stream, url) {
+  /** Items matching the request's status, time, sequence and field filters, sorted. */
+  function queryItems(req, stream, url, { publishedOnly = false } = {}) {
     let items = logs.get(stream.id).all();
 
     if (stream.draftAndPublish) {
-      const status = url.searchParams.get('status') || 'published';
+      const status = publishedOnly ? 'published' : url.searchParams.get('status') || 'published';
       if (!['published', 'draft', 'scheduled', 'all'].includes(status)) fail(400, 'status must be published, draft, scheduled or all');
       if (status !== 'published' && !can(req, stream, 'read')) fail(401, 'Reading drafts needs the API token or a key with the "read" scope');
       if (status === 'published') items = items.filter((i) => i.publishedAt != null);
@@ -870,9 +931,74 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
       return cmp * sign || (a.seq - b.seq) * sign;
     });
+    return items;
+  }
 
-    const page = paginate(items, url, { defaultSize: 25, maxSize: 500 });
+  function listItems(req, res, stream, url) {
+    const page = paginate(queryItems(req, stream, url), url, { defaultSize: 25, maxSize: 500 });
     send(res, 200, { ...page, data: populate(req, stream, page.data, url) });
+  }
+
+  // ---- standard formats ------------------------------------------------------
+
+  const FORMATS = {
+    'feed.ics': { type: 'text/calendar; charset=utf-8', limit: 10000, render: toICS },
+    'feed.rss': { type: 'application/rss+xml; charset=utf-8', limit: 50, render: toRSS },
+    'feed.json': { type: 'application/feed+json; charset=utf-8', limit: 50, render: (s, i, c) => JSON.stringify(toJSONFeed(s, i, c), null, 2) },
+    'feed.geojson': { type: 'application/geo+json; charset=utf-8', limit: 10000, render: (s, i, c) => JSON.stringify(toGeoJSON(s, i, c)) },
+    'items.csv': { type: 'text/csv; charset=utf-8', limit: 100000, render: toCSV, download: 'csv' },
+  };
+
+  function originOf(req) {
+    if (publicUrl) return publicUrl.replace(/\/+$/, '');
+    const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+    return `${proto}://${req.headers.host || 'localhost'}`;
+  }
+
+  /** Published items in a standard format. Filters, since/until and sort work as on /items. */
+  function sendFormat(req, res, stream, name, url) {
+    const format = FORMATS[name];
+    const limit = Math.min(format.limit, Math.max(1, parseInt(url.searchParams.get('limit'), 10) || format.limit));
+    const items = queryItems(req, stream, url, { publishedOnly: true }).slice(0, limit);
+    const origin = originOf(req);
+    const streamUrl = `${origin}/api/streams/${stream.slug}`;
+    const overrides = {};
+    for (const role of ['title', 'description', 'start', 'end', 'allDay', 'venue', 'url', 'location', 'image']) {
+      const v = url.searchParams.get(role);
+      if (v) {
+        if (!stream.fields.some((f) => f.name === v)) fail(400, `${role}=${v}: not a field of this stream`);
+        overrides[role] = v;
+      }
+    }
+    const tz = url.searchParams.get('tz');
+    if (tz) {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: tz });
+      } catch {
+        fail(400, `tz=${tz} is not a known IANA time zone (e.g. Europe/London)`);
+      }
+    }
+    const link = url.searchParams.get('link');
+    const site = url.searchParams.get('site');
+    for (const [k, v] of [['link', link], ['site', site]]) {
+      if (v && !/^https?:\/\//.test(v)) fail(400, `${k} must start with http:// or https://`);
+    }
+    const body = format.render(stream, items, {
+      overrides,
+      timeZone: tz || process.env.MEDIA_TIMEZONE || 'UTC',
+      linkPattern: link,
+      siteUrl: site,
+      streamUrl,
+      itemsUrl: `${streamUrl}/items`,
+      feedUrl: `${origin}${url.pathname}`,
+      host: new URL(origin).host,
+      absolute: (path) => new URL(path, `${origin}/`).href,
+      getFile: (id) => store.getFile(id),
+    });
+    const headers = { 'Content-Type': format.type, 'Cache-Control': 'public, max-age=60' };
+    if (format.download) headers['Content-Disposition'] = `attachment; filename="${stream.slug}.${format.download}"`;
+    res.writeHead(200, headers);
+    res.end(body);
   }
 
   function getItem(req, res, stream, id, url) {
@@ -1059,6 +1185,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
     if (parts.length === 2 && parts[1] === 'schema' && m === 'GET') return finish(send(res, 200, jsonSchema(stream)));
     if (parts.length === 2 && parts[1] === 'subscribe' && m === 'GET') return finish(subscribe(req, res, stream, url));
+    if (parts.length === 2 && Object.hasOwn(FORMATS, parts[1]) && m === 'GET') return finish(sendFormat(req, res, stream, parts[1], url));
     if (parts.length === 4 && parts[1] === 'webhooks' && parts[3] === 'test' && m === 'POST') {
       return finish(testWebhook(req, res, stream, parts[2]));
     }

@@ -24,6 +24,10 @@ export async function createApp(options = {}) {
     publicDir: options.publicDir ?? join(ROOT, 'public'),
     token: options.token ?? process.env.MEDIA_API_TOKEN ?? '',
     maxFileSize: options.maxFileSize ?? Number(process.env.MEDIA_MAX_FILE_SIZE || 50 * 1024 * 1024),
+    // Websites allowed to call the API from a browser: "*" or a comma-separated list of origins.
+    corsOrigins: parseOrigins(options.cors ?? process.env.MEDIA_CORS_ORIGINS ?? ''),
+    // Public base URL for absolute links in feeds, e.g. https://cms.example.com (else taken from the Host header).
+    publicUrl: options.publicUrl ?? process.env.MEDIA_PUBLIC_URL ?? null,
   };
   const uploadDir = join(config.dataDir, 'uploads');
   await mkdir(uploadDir, { recursive: true });
@@ -115,6 +119,7 @@ export async function createApp(options = {}) {
     bearer,
     webhookOptions: options.webhookOptions,
     schedulerIntervalMs: options.schedulerIntervalMs,
+    publicUrl: config.publicUrl,
   });
 
   // ---- route handlers ------------------------------------------------------
@@ -362,7 +367,7 @@ export async function createApp(options = {}) {
 
     if (pathname === '/api/health' && m === 'GET') return send(res, 200, { ok: true });
     if (pathname === '/api/config' && m === 'GET') {
-      return send(res, 200, { authRequired: Boolean(config.token), maxFileSize: config.maxFileSize });
+      return send(res, 200, { authRequired: Boolean(config.token), maxFileSize: config.maxFileSize, corsOrigins: config.corsOrigins });
     }
     if (pathname === '/api/stream-templates' && m === 'GET') return send(res, 200, { data: TEMPLATES });
     if (pathname === '/api/upload' && m === 'POST') return upload(req, res, url);
@@ -400,8 +405,34 @@ export async function createApp(options = {}) {
     throw new HttpError(405, 'Method not allowed');
   }
 
+  /**
+   * CORS: lets the configured websites read (and, with a token, write) the API
+   * from a browser. Answers preflight requests directly.
+   */
+  function applyCors(req, res) {
+    const origin = req.headers.origin;
+    if (!origin || !config.corsOrigins.length) return false;
+    const any = config.corsOrigins.includes('*');
+    if (!any && !config.corsOrigins.includes(origin)) return false;
+    res.setHeader('Access-Control-Allow-Origin', any ? '*' : origin);
+    if (!any) res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    if (req.method === 'OPTIONS' && req.headers['access-control-request-method']) {
+      res.writeHead(204, {
+        'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Last-Event-ID',
+        'Access-Control-Max-Age': '600',
+      });
+      res.end();
+      return true;
+    }
+    return false;
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
+      const path = req.url.split('?')[0];
+      if ((path.startsWith('/api/') || path.startsWith('/uploads/') || path.startsWith('/ui/')) && applyCors(req, res)) return;
       await route(req, res);
     } catch (err) {
       const status = err.status || 500;
@@ -420,6 +451,24 @@ export async function createApp(options = {}) {
   return { server, store, config, close, streams };
 }
 
+/** "*" or "https://a.com, https://b.com" -> ['*'] / ['https://a.com', 'https://b.com']. Invalid entries are rejected. */
+export function parseOrigins(value) {
+  const list = String(value).split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
+  for (const o of list) {
+    if (o === '*') continue;
+    let u;
+    try {
+      u = new URL(o);
+    } catch {
+      throw new Error(`Invalid CORS origin "${o}". Use "*" or origins like https://www.example.com`);
+    }
+    if (!['http:', 'https:'].includes(u.protocol) || u.origin !== o) {
+      throw new Error(`Invalid CORS origin "${o}". Use only scheme, host and port, e.g. https://www.example.com`);
+    }
+  }
+  return list;
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB'];
@@ -432,7 +481,7 @@ function formatBytes(n) {
 // The options work the same in every shell (bash, PowerShell, cmd.exe) and
 // take precedence over the matching environment variables.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const OPTIONS = { token: 'MEDIA_API_TOKEN', port: 'PORT', host: 'HOST' };
+  const OPTIONS = { token: 'MEDIA_API_TOKEN', port: 'PORT', host: 'HOST', cors: 'MEDIA_CORS_ORIGINS', 'public-url': 'MEDIA_PUBLIC_URL' };
   const args = {};
   for (const arg of process.argv.slice(2)) {
     const m = /^--([a-z-]+)=(.*)$/.exec(arg);
@@ -444,7 +493,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   }
   const port = Number(args.port || process.env.PORT || 1338);
   const host = args.host || process.env.HOST || '0.0.0.0';
-  const { server, config } = await createApp({ token: args.token });
+  let app;
+  try {
+    app = await createApp({ token: args.token, cors: args.cors, publicUrl: args['public-url'] });
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  const { server, config } = app;
   server.on('error', (err) => {
     if (err.code !== 'EADDRINUSE') throw err;
     console.error(`Port ${port} is already in use. Stop the other program, or use another port: npm start -- --port=${port + 1}`);
@@ -453,5 +509,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   server.listen(port, host, () => {
     console.log(`Media manager running at http://localhost:${port}`);
     console.log(config.token ? 'API token required for write operations.' : 'Warning: MEDIA_API_TOKEN not set — write API is open.');
+    if (config.corsOrigins.length) console.log(`Browser access from other websites allowed for: ${config.corsOrigins.join(', ')}`);
   });
 }

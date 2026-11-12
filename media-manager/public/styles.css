@@ -430,3 +430,11 @@ pre { margin: 0; padding: 12px 14px; background: #212134; color: #eaeaef; border
   .key-reveal code { background: rgba(0, 0, 0, .3); color: inherit; }
 }
 .schedule-box { padding: 12px; border: 1px dashed var(--border); border-radius: var(--radius); }
+
+/* ---- template groups, map pins ------------------------------------------- */
+.template-group { margin-bottom: 12px; }
+.template-group-title { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 6px; }
+.geo-input { display: flex; flex-direction: column; gap: 6px; }
+.geo-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.geo-row input { flex: 1 1 120px; width: auto; }
+.geo-row .btn-ghost { width: auto; }

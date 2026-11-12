@@ -2,11 +2,12 @@
 
 export const FIELD_TYPES = [
   'string', 'text', 'richtext', 'uid', 'email', 'url',
-  'integer', 'number', 'boolean', 'datetime', 'enum', 'tags', 'json', 'media', 'relation',
+  'integer', 'number', 'boolean', 'datetime', 'date', 'enum', 'tags', 'json', 'media', 'relation', 'geopoint',
 ];
 
 export const UID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_FIELDS = 100;
 const MAX_TAGS = 100;
@@ -178,6 +179,24 @@ function coerce(field, value, mediaExists, relationExists) {
       if (!date || Number.isNaN(date.getTime())) return { error: 'must be an ISO 8601 date-time' };
       return { value: date.toISOString() };
     }
+    case 'date': {
+      const m = typeof value === 'string' ? DATE_ONLY.exec(value) : null;
+      const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+      if (!d || d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) {
+        return { error: 'must be a date like 2026-12-31' };
+      }
+      return { value };
+    }
+    case 'geopoint': {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return { error: 'must be an object like { "lat": 51.5, "lng": -0.12 }' };
+      const extra = Object.keys(value).filter((k) => !['lat', 'lng', 'label'].includes(k));
+      if (extra.length) return { error: `unknown key ${extra.join(', ')} (allowed: lat, lng, label)` };
+      const { lat, lng, label } = value;
+      if (typeof lat !== 'number' || !Number.isFinite(lat) || lat < -90 || lat > 90) return { error: 'lat must be a number between -90 and 90' };
+      if (typeof lng !== 'number' || !Number.isFinite(lng) || lng < -180 || lng > 180) return { error: 'lng must be a number between -180 and 180' };
+      if (label !== undefined && label !== null && (typeof label !== 'string' || label.length > 200)) return { error: 'label must be a string of at most 200 characters' };
+      return { value: { lat, lng, ...(label ? { label: label.trim() } : {}) } };
+    }
     case 'enum':
       return field.options.includes(value) ? { value } : { error: `must be one of: ${field.options.join(', ')}` };
     case 'tags': {
@@ -233,6 +252,14 @@ export function fieldJsonSchema(f) {
     number: { type: 'number' },
     boolean: { type: 'boolean' },
     datetime: { type: 'string', format: 'date-time' },
+    date: { type: 'string', format: 'date' },
+    geopoint: {
+      type: 'object',
+      properties: { lat: { type: 'number', minimum: -90, maximum: 90 }, lng: { type: 'number', minimum: -180, maximum: 180 }, label: { type: 'string', maxLength: 200 } },
+      required: ['lat', 'lng'],
+      additionalProperties: false,
+      description: 'Map pin (WGS 84)',
+    },
     enum: { type: 'string', enum: f.options },
     tags: { type: 'array', items: { type: 'string', maxLength: MAX_TAG_LENGTH }, uniqueItems: true, maxItems: MAX_TAGS },
     json: {},

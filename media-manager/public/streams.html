@@ -148,6 +148,7 @@
                   <label>Plural label<input name="plural" required maxlength="40" placeholder="posts"></label>
                 </div>
                 <span class="hint small">Used throughout the admin UI, e.g. “New post”, “12 posts”.</span>
+                <label style="margin-top:12px">Schema.org type<input name="schemaType" maxlength="60" placeholder="e.g. Event, BlogPosting, Product"><span class="hint">Lets embedded components add structured data for search engines. Leave blank for none.</span></label>
               </div>
               <div>
                 <h3 class="section-title">Publishing</h3>
@@ -224,7 +225,7 @@
       <div class="modal-body fields">
         <div>
           <h3 class="section-title">Start from</h3>
-          <div class="template-grid" id="templatePicker" role="radiogroup" aria-label="Template"></div>
+          <div id="templatePicker" role="radiogroup" aria-label="Template"></div>
         </div>
         <div class="row-2">
           <label>Display name<input name="name" required maxlength="100" autocomplete="off" placeholder="Order events"></label>

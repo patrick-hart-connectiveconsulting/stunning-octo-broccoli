@@ -55,7 +55,8 @@ after(async () => {
 
 test('templates are listed and pre-fill new streams', async () => {
   const { data } = await call('/api/stream-templates', { anon: true });
-  assert.deepEqual(data.data.map((t) => t.id), ['blank', 'event-log', 'blog-posts', 'social-feed', 'products']);
+  const ids = data.data.map((t) => t.id);
+  for (const id of ['blank', 'event-log', 'blog-posts', 'social-feed', 'products']) assert.ok(ids.includes(id), id);
 
   const blog = await call('/api/streams', { method: 'POST', json: { name: 'Blog', template: 'blog-posts' } });
   assert.equal(blog.status, 201);

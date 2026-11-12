@@ -1,3 +1,5 @@
+> **Media Manager:** the `media-manager/` folder contains a separate, dependency-free media library and data streams server. To run and test it on your computer, see [media-manager/README.md](media-manager/README.md).
+
 # 🚀 Getting started with Strapi
 
 Strapi comes with a full featured [Command Line Interface](https://docs.strapi.io/dev-docs/cli) (CLI) which lets you scaffold and manage your project in seconds.

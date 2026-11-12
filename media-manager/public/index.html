@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Library</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234945ff'/><path d='M8 22l5-6 4 4 3-3 4 5z' fill='white'/><circle cx='20' cy='11' r='2.5' fill='white'/></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 22l5-6 4 4 3-3 4 5z" fill="#fff"/><circle cx="20" cy="11" r="2.5" fill="#fff"/></svg>
+        </span>
+        <span>Media Manager</span>
+      </div>
+      <nav>
+        <a class="nav-item active" href="#" data-nav="root">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 16l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          Media Library
+        </a>
+        <a class="nav-item" href="/streams.html">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          Streams
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="btn btn-ghost btn-sm" id="tokenBtn" title="API token" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 12l9-9M17 6l3 3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span id="tokenLabel">Set API token</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="page-header">
+        <div>
+          <h1>Media Library</h1>
+          <p class="subtitle" id="summary">Loading…</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary" id="newFolderBtn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2"/></svg>
+            Add new folder
+          </button>
+          <button class="btn btn-primary" id="uploadBtn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2"/></svg>
+            Add new assets
+          </button>
+        </div>
+      </header>
+
+      <div class="toolbar">
+        <label class="select-all" title="Select all assets on this page">
+          <input type="checkbox" id="selectAll">
+        </label>
+        <div class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2"/></svg>
+          <input type="search" id="search" placeholder="Search assets" aria-label="Search assets">
+        </div>
+        <select id="typeFilter" aria-label="Filter by type">
+          <option value="">All types</option>
+          <option value="image">Images</option>
+          <option value="video">Videos</option>
+          <option value="audio">Audio</option>
+          <option value="file">Files</option>
+        </select>
+        <select id="sort" aria-label="Sort by">
+          <option value="createdAt:desc">Most recent uploads</option>
+          <option value="createdAt:asc">Oldest uploads</option>
+          <option value="name:asc">Alphabetical order (A to Z)</option>
+          <option value="name:desc">Reverse alphabetical (Z to A)</option>
+          <option value="updatedAt:desc">Most recent updates</option>
+          <option value="size:desc">Largest first</option>
+        </select>
+        <div class="bulk" id="bulkBar" hidden>
+          <span id="bulkCount"></span>
+          <button class="btn btn-secondary btn-sm" id="bulkMove">Move</button>
+          <button class="btn btn-danger btn-sm" id="bulkDelete">Delete</button>
+        </div>
+      </div>
+
+      <nav class="breadcrumbs" id="breadcrumbs" aria-label="Folder path"></nav>
+
+      <section id="foldersSection" hidden>
+        <h2 class="section-title">Folders <span id="folderCount"></span></h2>
+        <div class="folder-grid" id="folders"></div>
+      </section>
+
+      <section>
+        <h2 class="section-title">Assets <span id="assetCount"></span></h2>
+        <div class="asset-grid" id="assets"></div>
+        <div class="empty" id="empty" hidden>
+          <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="8" y="12" width="48" height="40" rx="6" fill="none" stroke="currentColor" stroke-width="3"/><path d="M8 42l14-14 10 10 8-8 16 16" fill="none" stroke="currentColor" stroke-width="3"/><circle cx="42" cy="24" r="4" fill="currentColor"/></svg>
+          <p id="emptyText">Upload your first assets…</p>
+          <button class="btn btn-primary" id="emptyUpload">Add new assets</button>
+        </div>
+      </section>
+
+      <footer class="pagination" id="pagination"></footer>
+    </main>
+  </div>
+
+  <!-- Upload dialog -->
+  <dialog id="uploadDialog" class="modal">
+    <form method="dialog" class="modal-inner">
+      <header class="modal-header">
+        <h2>Add new assets</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" multiple hidden>
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 32V12M16 20l8-8 8 8" fill="none" stroke="currentColor" stroke-width="3"/><path d="M8 32v8h32v-8" fill="none" stroke="currentColor" stroke-width="3"/></svg>
+          <strong>Drag &amp; drop here or <u>browse files</u></strong>
+          <span class="muted" id="uploadLimit"></span>
+        </label>
+        <p class="muted small" id="uploadDest"></p>
+        <ul class="queue" id="queue"></ul>
+      </div>
+      <footer class="modal-footer">
+        <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" id="startUpload" type="button" disabled>Upload assets</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Asset details dialog -->
+  <dialog id="assetDialog" class="modal modal-wide">
+    <form method="dialog" class="modal-inner" id="assetForm">
+      <header class="modal-header">
+        <h2>Details</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body details">
+        <div class="preview-pane">
+          <div class="preview" id="assetPreview"></div>
+          <div class="preview-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="copyLink">Copy link</button>
+            <a class="btn btn-secondary btn-sm" id="downloadLink" href="#">Download</a>
+            <button type="button" class="btn btn-secondary btn-sm" id="replaceBtn">Replace media</button>
+            <input type="file" id="replaceInput" hidden>
+            <button type="button" class="btn btn-danger btn-sm" id="deleteAsset">Delete</button>
+          </div>
+        </div>
+        <div class="fields">
+          <dl class="meta" id="assetMeta"></dl>
+          <label>File name<input name="name" required maxlength="255"></label>
+          <label>Alternative text<input name="alternativeText" maxlength="1000"><span class="hint">Describes the asset for users who can't see it.</span></label>
+          <label>Caption<input name="caption" maxlength="1000"></label>
+          <label>Location<select name="folder" id="assetFolder"></select></label>
+        </div>
+      </div>
+      <footer class="modal-footer">
+        <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" id="saveAsset" type="submit">Finish</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Folder dialog -->
+  <dialog id="folderDialog" class="modal">
+    <form method="dialog" class="modal-inner" id="folderForm">
+      <header class="modal-header">
+        <h2 id="folderDialogTitle">Add new folder</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body fields">
+        <label>Name<input name="name" required maxlength="100" autocomplete="off"></label>
+        <label>Location<select name="parent" id="folderParent"></select></label>
+      </div>
+      <footer class="modal-footer">
+        <button class="btn btn-danger" type="button" id="deleteFolder" hidden>Delete folder</button>
+        <span class="spacer"></span>
+        <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Move dialog -->
+  <dialog id="moveDialog" class="modal">
+    <form method="dialog" class="modal-inner" id="moveForm">
+      <header class="modal-header">
+        <h2>Move assets</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body fields">
+        <label>Location<select name="folder" id="moveFolder"></select></label>
+      </div>
+      <footer class="modal-footer">
+        <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit">Move</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="drop-overlay" id="dropOverlay" hidden><div>Drop files to upload</div></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

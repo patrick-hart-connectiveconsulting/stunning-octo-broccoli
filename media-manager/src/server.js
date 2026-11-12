@@ -367,7 +367,7 @@ export async function createApp(options = {}) {
 
     if (pathname === '/api/health' && m === 'GET') return send(res, 200, { ok: true });
     if (pathname === '/api/config' && m === 'GET') {
-      return send(res, 200, { authRequired: Boolean(config.token), maxFileSize: config.maxFileSize, corsOrigins: config.corsOrigins });
+      return send(res, 200, { authRequired: Boolean(config.token), maxFileSize: config.maxFileSize, corsOrigins: config.corsOrigins, publicUrl: config.publicUrl });
     }
     if (pathname === '/api/stream-templates' && m === 'GET') return send(res, 200, { data: TEMPLATES });
     if (pathname === '/api/upload' && m === 'POST') return upload(req, res, url);

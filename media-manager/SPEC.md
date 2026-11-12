@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.6.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.7.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.7:** the admin **Embed** tab: choose a component for a stream, set its options, see a live preview and copy the code for your website.
+>
 > **New in 0.6:** the **Streams UI component library**: web components (`<stream-list>`, `<stream-calendar>`, `<stream-map>`…) that show streams on any website as HTML. See §15a and [UI.md](UI.md).
 >
 > **New in 0.5:** **map pin** (`geopoint`) and **date** field types with map filters, nine new **templates** with schema.org types, **standard output formats** (iCalendar, RSS, JSON Feed, GeoJSON, CSV), `populate` for **media** fields, and **CORS** so websites can call the API from a browser.
@@ -601,7 +603,7 @@ POST /api/streams/orders/keys
 | Method | Path | Returns |
 | --- | --- | --- |
 | `GET` | `/api/health` | `{ "ok": true }` |
-| `GET` | `/api/config` | `{ "authRequired": bool, "maxFileSize": bytes }` |
+| `GET` | `/api/config` | `{ "authRequired": bool, "maxFileSize": bytes, "corsOrigins": [...], "publicUrl": string \| null }` |
 
 ---
 
@@ -624,6 +626,12 @@ POST /api/streams/orders/keys
   - Its buttons are *Save draft* / *Schedule*, *Publish* / *Save & publish* and *Unpublish*, depending on the item's state.
 - **Dataset tab:** the field builder. It covers every type in §3, with required, unique, length, min/max, enum options, the UID source field, and the target stream and "Many" option for relations. It also lets you reorder fields.
 - **Settings tab:** labels, the draft & publish toggle and retention limits. *API keys* lists each key (name, prefix, scopes, created, last used, expiry) with a *Revoke* button, and creates keys, showing the secret once with a copy button. You confirm before stricter limits delete anything. It also edits webhooks: URL, events, enabled, secret (copy or rotate), last delivery status, and *Send test*. The *Delete stream* button is here too; you confirm by typing the slug.
+- **Embed tab:**
+  - **Component choice:** the tab recommends a component for the stream: Calendar for dated items, Map for map pins, Banner for announcements, Cards for streams with images, otherwise List. Components the stream can't support are disabled with the reason, such as "Needs a map pin field".
+  - **Options:** the component's own options, plus items to show, order, the link pattern, theme, date style, accent colour, corner radius, live updates, "load more" and structured data.
+  - **Preview:** a live preview of the published items.
+  - **Code:** the code to copy. It uses `MEDIA_PUBLIC_URL` (from `/api/config`) or the current address, and you can edit the address. Attribute values are escaped.
+  - **CORS:** the tab shows which websites may use the API.
 - **API tab:** the endpoint list and copy-paste examples for that stream: create, list, filter, get by slug, poll, subscribe, and verifying a webhook signature. It also links to the stream's JSON Schema.
 
 The selected stream and tab are kept in the URL (`/streams.html?stream=blog&tab=settings`).

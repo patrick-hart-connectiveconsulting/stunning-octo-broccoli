@@ -8,7 +8,7 @@ Web components that show Media Manager streams on any website as formatted HTML:
 - **Live:** add `live` and the component updates when the stream changes.
 - **Accessible:** semantic HTML, keyboard support, and `prefers-reduced-motion` is respected.
 
-To see every component working, start the server, run `npm run seed:demo`, and open **`/ui/demo.html`**.
+To see every component working, start the server, run `npm run seed:demo`, and open **`/ui/demo.html`**. To make the code for one of your streams without writing it by hand, open the stream in the admin page and use the **Embed** tab.
 
 ---
 

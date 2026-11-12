@@ -525,7 +525,19 @@ A website on a different address can use the components only if the server allow
 
 If the server does not allow the website, the component shows a red message. The message gives the `--cors=` value to use.
 
-### 10.4 Do the browser tests (optional)
+### 10.4 Make the code for your website (Embed tab)
+
+1. Open <http://localhost:1338/streams.html>.
+2. Click a stream, for example **Demo events**.
+3. Click the **Embed** tab. The tab selects a recommended component, for example **Calendar** for events.
+4. Click a different component to try it. A component that the stream cannot use is not available. For example, **Map** needs a map pin field.
+5. Change the options. The **Preview** changes immediately.
+6. In **Server address in the code**, type the address that your website uses for this server. Example: `https://cms.example.com`.
+7. Click **Copy code**. Paste the code into a page of your website.
+
+> **NOTE:** The preview shows only published items, as a visitor sees them.
+
+### 10.5 Do the browser tests (optional)
 
 The browser tests examine all components in Chromium. They need Playwright, which is not part of Media Manager.
 
@@ -542,7 +554,7 @@ The browser tests examine all components in Chromium. They need Playwright, whic
    npm run test:browser
    ```
 
-3. Make sure that the last lines show `pass 10` and `fail 0`.
+3. Make sure that the last lines show `pass 14` and `fail 0`.
 
 The tests start their own server with a temporary data folder. They do not use your data.
 
@@ -610,7 +622,7 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 | Problem | Cause | Action |
 | --- | --- | --- |
 | A component shows `Cannot load from http://localhost:1338` | The server does not allow the website, or the server does not operate. | Start the server with the `--cors=` value from the message (section 10.3). |
-| `npm run test:browser` shows `Playwright is not installed` | Playwright is not installed. | Do step 10.4, step 1. |
+| `npm run test:browser` shows `Playwright is not installed` | Playwright is not installed. | Do step 10.5, step 1. |
 | A website on a different address gets `blocked by CORS policy` in the browser console | The server does not allow that website. | Start the server with the address of the website: `npm start -- --token=dev-token --cors=http://localhost:5173`. |
 | PowerShell shows `The term 'MEDIA_API_TOKEN=dev-token' is not recognized`, or Command Prompt shows `'MEDIA_API_TOKEN' is not recognized as an internal or external command` | The `NAME=value command` form operates in `bash` and `zsh` only. | Use `npm run start:local` (step 3.1). Or use the command for your terminal from the table in step 3.1. |
 | The terminal shows `Could not read package.json` | The terminal is not in the `media-manager` folder. | Go to the folder: `cd stunning-octo-broccoli/media-manager`. Then enter the command again. |
@@ -646,7 +658,7 @@ media-manager/
 │   ├── http.js          Shared HTTP functions
 │   ├── image-size.js    Reads the dimensions of images
 │   └── mime.js          File types
-├── public/              The admin pages (HTML, CSS and JavaScript, no build step)
+├── public/              The admin pages (HTML, CSS and JavaScript, no build step). embed.js is the Embed tab.
 │   └── ui/              The component library (streams-ui.js), the demo page and Leaflet
 ├── scripts/
 │   └── seed-demo.js     Makes the demo streams (npm run seed:demo)

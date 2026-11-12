@@ -19,6 +19,8 @@ const FIELD_TYPES = [
   ['json', 'JSON'],
   ['media', 'Media'],
   ['relation', 'Relation'],
+  ['date', 'Date'],
+  ['geopoint', 'Map pin'],
 ];
 const KEY_SCOPES = [
   ['read', 'Read (incl. drafts)'],
@@ -82,6 +84,16 @@ function itemLabel(stream, item) {
     || fields.find((f) => ['string', 'uid', 'email'].includes(f.type) && typeof item.data?.[f.name] === 'string' && item.data[f.name]);
   return field ? truncate(item.data[field.name], 60) : `#${item.seq}`;
 }
+/** Finds "lat, lng" in pasted text: Google Maps (@lat,lng / q=lat,lng), OpenStreetMap (mlat/mlon, #map=z/lat/lng) or plain. */
+function parseCoordinates(text) {
+  const t = String(text);
+  const osm = /mlat=(-?\d+(?:\.\d+)?).*?mlon=(-?\d+(?:\.\d+)?)/.exec(t) || /#map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/.exec(t);
+  const m = osm || /(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/.exec(t);
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lng = Number(m[2]);
+  return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat, lng } : null;
+}
 const streamBySlug = (slug) => state.streams.find((s) => s.slug === slug);
 const itemStatus = (item) => (item.publishedAt ? 'published' : item.publishAt ? 'scheduled' : 'draft');
 
@@ -91,7 +103,9 @@ function preview(value, type, field) {
   if (type === 'datetime') return formatDate(value);
   if (type === 'enum') return h('span', { class: 'pill' }, value);
   if (type === 'tags') return h('span', { class: 'tag-list' }, value.slice(0, 4).map((t) => h('span', { class: 'pill' }, t)), value.length > 4 ? ` +${value.length - 4}` : null);
-  if (type === 'media') return h('code', { class: 'small' }, `${value.slice(0, 8)}…`);
+  if (type === 'media') return typeof value === 'object' ? h('span', { class: 'pill rel', title: value.name }, truncate(value.name, 24)) : h('code', { class: 'small' }, `${value.slice(0, 8)}…`);
+  if (type === 'date') return new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { dateStyle: 'medium' });
+  if (type === 'geopoint') return h('span', { title: `${value.lat}, ${value.lng}` }, '📍 ', value.label || `${value.lat.toFixed(4)}, ${value.lng.toFixed(4)}`);
   if (type === 'relation') {
     const target = streamBySlug(field?.target);
     const list = (Array.isArray(value) ? value : [value]).filter(Boolean);
@@ -488,7 +502,33 @@ async function itemInput(field, value, form) {
         items.length > 8 ? search : null,
         h('div', { class: 'rel-options' }, options.length ? options : h('span', { class: 'muted small' }, `No ${target?.labels.plural || 'items'} yet`)));
     }
+    case 'date':
+      return h('input', { ...common, type: 'date', value: value ?? '' });
+    case 'geopoint': {
+      const p = value || {};
+      const lat = h('input', { name: `${common.name}.lat`, type: 'number', step: 'any', min: -90, max: 90, placeholder: 'Latitude', value: p.lat ?? '', 'aria-label': `${field.name} latitude` });
+      const lng = h('input', { name: `${common.name}.lng`, type: 'number', step: 'any', min: -180, max: 180, placeholder: 'Longitude', value: p.lng ?? '', 'aria-label': `${field.name} longitude` });
+      const label = h('input', { name: `${common.name}.label`, maxlength: 200, placeholder: 'Label (optional)', value: p.label ?? '', 'aria-label': `${field.name} label` });
+      const paste = h('input', {
+        placeholder: 'Or paste a map link / "lat, lng"', 'aria-label': 'Paste a map link or coordinates',
+        oninput: (e) => {
+          const found = parseCoordinates(e.target.value);
+          if (found) {
+            lat.value = found.lat;
+            lng.value = found.lng;
+            e.target.value = '';
+            toast(`Pin set to ${found.lat}, ${found.lng}`);
+          }
+        },
+      });
+      const open = h('a', { class: 'btn btn-ghost btn-sm', target: '_blank', rel: 'noopener', onclick: (e) => {
+        if (!lat.value || !lng.value) { e.preventDefault(); return toast('Enter coordinates first', 'error'); }
+        e.currentTarget.href = `https://www.openstreetmap.org/?mlat=${lat.value}&mlon=${lng.value}#map=15/${lat.value}/${lng.value}`;
+      } }, 'View on map ↗');
+      return h('div', { class: 'geo-input' }, h('div', { class: 'geo-row' }, lat, lng, label), h('div', { class: 'geo-row' }, paste, open));
+    }
     case 'media': {
+      if (value && typeof value === 'object') value = value.id;
       const files = await mediaOptions();
       const sel = h('select', common, h('option', { value: '' }, '—'),
         files.map((f) => h('option', { value: f.id, selected: f.id === value }, f.name)));
@@ -578,6 +618,12 @@ function readItemForm() {
       data[f.name] = [...form.querySelectorAll(`input[type=checkbox][name="f:${f.name}"]:checked`)].map((i) => i.value);
       continue;
     }
+    if (f.type === 'geopoint') {
+      const get = (k) => form.elements[`f:${f.name}.${k}`].value.trim();
+      const [lat, lng, label] = [get('lat'), get('lng'), get('label')];
+      data[f.name] = lat === '' && lng === '' ? null : { lat: lat === '' ? null : Number(lat), lng: lng === '' ? null : Number(lng), ...(label ? { label } : {}) };
+      continue;
+    }
     const el = form.elements[`f:${f.name}`];
     const v = el.value.trim();
     if (f.type === 'tags') { data[f.name] = v.split(',').map((t) => t.trim()).filter(Boolean); continue; }
@@ -587,7 +633,7 @@ function readItemForm() {
     else if (f.type === 'datetime') data[f.name] = fromLocalInput(v);
     else if (f.type === 'json') {
       try { data[f.name] = JSON.parse(v); } catch { throw new Error(`${f.name} must be valid JSON`); }
-    } else if (['string', 'uid', 'email', 'url', 'relation'].includes(f.type)) data[f.name] = v;
+    } else if (['string', 'uid', 'email', 'url', 'relation', 'date', 'media'].includes(f.type)) data[f.name] = v;
     else data[f.name] = el.value; // keep inner whitespace for text / richtext
   }
   return data;
@@ -804,6 +850,7 @@ function renderSettings() {
   form.draftAndPublish.checked = s.draftAndPublish;
   form.maxItems.value = s.retention.maxItems ?? '';
   form.maxAgeDays.value = s.retention.maxAgeDays ?? '';
+  form.schemaType.value = s.schemaType || '';
   $('#webhookList').replaceChildren(...(s.webhooks || []).map((w) => webhookRow(w)));
 }
 
@@ -816,6 +863,7 @@ async function saveSettings(e) {
     labels: { singular: form.singular.value, plural: form.plural.value },
     draftAndPublish: form.draftAndPublish.checked,
     retention: { maxItems: num(form.maxItems.value), maxAgeDays: num(form.maxAgeDays.value) },
+    schemaType: form.schemaType.value.trim() || null,
     webhooks: [...$('#webhookList').children].map((r) => r._get()),
   };
   const total = s.itemCount + (s.draftCount || 0);
@@ -929,6 +977,20 @@ function renderApiDocs() {
       h('div', { class: 'example-head' }, h('strong', {}, title),
         h('button', { class: 'btn btn-secondary btn-sm', onclick: () => copyText(code) }, 'Copy')),
       h('pre', {}, code))),
+    h('h3', { class: 'section-title', style: 'margin-top:24px' }, 'Standard formats'),
+    h('p', { class: 'muted small' }, 'Published items only. Filters, since/until and sort work as on /items. Add ?link=https://your-site/path/{slug} to link items to your website.'),
+    h('table', { class: 'endpoints' }, h('tbody', {}, [
+      ['feed.ics', 'iCalendar — subscribe in Google, Outlook or Apple Calendar', true],
+      ['feed.rss', 'RSS 2.0 — feed readers, newsletters, Zapier', true],
+      ['feed.json', 'JSON Feed 1.1', true],
+      ['feed.geojson', 'GeoJSON — map tools (needs a map pin field)', s.fields.some((f) => f.type === 'geopoint')],
+      ['items.csv', 'CSV — open in Excel or Google Sheets', true],
+    ].filter(([, , on]) => on).map(([file, d]) => h('tr', {},
+      h('td', {}, h('span', { class: 'method get' }, 'GET')),
+      h('td', {}, h('a', { href: `${path}/${file}`, target: '_blank', rel: 'noopener' }, h('code', {}, `${path}/${file}`))),
+      h('td', { class: 'muted' }, d))))),
+    h('p', { class: 'muted small' }, 'Browser access from other websites (CORS): ',
+      state.config?.corsOrigins?.length ? h('code', {}, state.config.corsOrigins.join(', ')) : 'not enabled — start the server with --cors=https://your-site.example to call the API from your website.'),
     h('p', {}, h('a', { href: `${path}/schema`, target: '_blank', rel: 'noopener' }, 'Open the JSON Schema for this stream ↗')),
   );
 }
@@ -940,7 +1002,7 @@ let slugTouched = false;
 let chosenTemplate = 'blank';
 
 function renderTemplatePicker() {
-  $('#templatePicker').replaceChildren(...state.templates.map((t) => h('button', {
+  const card = (t) => h('button', {
     type: 'button', role: 'radio', class: 'template-card', 'aria-checked': String(t.id === chosenTemplate),
     onclick: () => chooseTemplate(t.id),
   },
@@ -949,7 +1011,11 @@ function renderTemplatePicker() {
   h('span', { class: 'small template-meta' },
     t.fields.length ? `${t.fields.length} fields` : 'Any JSON',
     t.draftAndPublish ? ' · drafts' : '',
-    t.retention.maxAgeDays ? ` · keeps ${t.retention.maxAgeDays} days` : ''))));
+    t.retention.maxAgeDays ? ` · keeps ${t.retention.maxAgeDays} days` : ''));
+  const groups = [...new Set(state.templates.map((t) => t.category || 'Other'))];
+  $('#templatePicker').replaceChildren(...groups.map((g) => h('div', { class: 'template-group' },
+    h('span', { class: 'template-group-title' }, g),
+    h('div', { class: 'template-grid' }, state.templates.filter((t) => (t.category || 'Other') === g).map(card)))));
 }
 
 function chooseTemplate(id) {
@@ -1061,7 +1127,7 @@ $('#clearFilter').addEventListener('click', () => {
 });
 
 (async function init() {
-  await initShell();
+  state.config = await initShell();
   try {
     const [templates] = await Promise.all([api('/api/stream-templates'), loadStreams()]);
     state.templates = templates.data;

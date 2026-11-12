@@ -19,10 +19,11 @@ For a full description of all functions and API endpoints, see [SPEC.md](SPEC.md
 6. [Do a manual test in the browser](#6-do-a-manual-test-in-the-browser)
 7. [Do a manual test of the API](#7-do-a-manual-test-of-the-api)
 8. [Test the webhooks](#8-test-the-webhooks)
-9. [Remove the test data](#9-remove-the-test-data)
-10. [Configuration](#10-configuration)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Files and folders](#12-files-and-folders)
+9. [Test the standard formats](#9-test-the-standard-formats)
+10. [Remove the test data](#10-remove-the-test-data)
+11. [Configuration](#11-configuration)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Files and folders](#13-files-and-folders)
 
 ---
 
@@ -33,7 +34,7 @@ For a full description of all functions and API endpoints, see [SPEC.md](SPEC.md
 | Node.js | Version 22 (LTS) is recommended. Version 20 is the minimum (see the note below). |
 | npm | The version that comes with Node.js |
 | Operating system | macOS, Linux or Windows |
-| Terminal | Sections 1–6 and 9: any terminal (Terminal on macOS, a Linux shell, PowerShell or Command Prompt on Windows). Step 6.7 and sections 7–8: `bash` or `zsh`. On Windows, use Git Bash or WSL for these steps. |
+| Terminal | Sections 1–6, 9 and 10: any terminal (Terminal on macOS, a Linux shell, PowerShell or Command Prompt on Windows). Step 6.7 and sections 7–8: `bash` or `zsh`. On Windows, use Git Bash or WSL for these steps. |
 | Browser | A current version of Chrome, Edge, Firefox or Safari |
 | `curl` | Necessary for sections 7 and 8 only. macOS, Linux, Git Bash and Windows 10 or later include `curl`. |
 
@@ -183,8 +184,8 @@ npm test
 The tests take approximately 3 seconds. Make sure that the last lines show `fail 0`:
 
 ```
-# tests 26
-# pass 26
+# tests 34
+# pass 34
 # fail 0
 ```
 
@@ -200,6 +201,7 @@ node --test test/streams.test.js
 | `test/streams.test.js` | Streams and items: create, filter, sort, pages, live feed, data after a restart |
 | `test/content.test.js` | Templates, draft and publish, field types, unique values, retention, webhooks |
 | `test/relations-keys-schedule.test.js` | Relations, API keys, scheduled publish and unpublish |
+| `test/formats-geo-cors.test.js` | CORS, map pins, dates, media in `populate`, calendar, RSS, JSON, GeoJSON and CSV formats |
 
 > **CAUTION:** Do not use `--test-name-pattern` to do only one test in a file. The tests in a file use the data from the tests before them. A single test can fail when it starts without that data. Always do a full file.
 
@@ -208,7 +210,7 @@ node --test test/streams.test.js
 1. Find the lines that start with `not ok`. They give the name of the test that failed.
 2. Read the `expected` and `actual` values below that line.
 3. Do the tests of that file again (step 5.2).
-4. If the test fails again, do the checks in [section 11](#11-troubleshooting).
+4. If the test fails again, do the checks in [section 12](#12-troubleshooting).
 
 ---
 
@@ -445,7 +447,29 @@ To stop the receiver, push **Ctrl+C** in its terminal.
 
 ---
 
-## 9. Remove the test data
+## 9. Test the standard formats
+
+Each stream also gives its published items in standard formats. Do this test after section 7. Open these addresses in the browser:
+
+| Address | Result |
+| --- | --- |
+| <http://localhost:1338/api/streams/blog/feed.rss> | An RSS feed |
+| <http://localhost:1338/api/streams/blog/feed.json> | A JSON Feed |
+| <http://localhost:1338/api/streams/blog/items.csv> | The browser downloads `blog.csv` |
+
+To test a calendar feed and map pins:
+
+1. Make a stream from the **Events** template (section 6.2, step 3).
+2. Make an event. Set **start**. In the field below **location**, paste a Google Maps link. The latitude and longitude change.
+3. Click **Publish**.
+4. Open <http://localhost:1338/api/streams/events/feed.ics>. The browser downloads a calendar file. Open the file in your calendar application.
+5. Open <http://localhost:1338/api/streams/events/feed.geojson>. The result shows a `Point` for each event.
+
+> **NOTE:** A calendar application on a different computer cannot read `localhost`. To subscribe from a phone, the server must be available on the network.
+
+---
+
+## 10. Remove the test data
 
 All data is in the `data/` folder:
 
@@ -471,7 +495,7 @@ Git ignores this folder.
 
 ---
 
-## 10. Configuration
+## 11. Configuration
 
 You can set these values as environment variables (see the table in step 3.1). For `token`, `port` and `host`, you can also use an option after `npm start --`. An option has priority over the environment variable.
 
@@ -482,6 +506,9 @@ You can set these values as environment variables (see the table in step 3.1). F
 | `MEDIA_API_TOKEN` | `--token=` | *(not set)* | The main API token. If you do not set it, all users can make changes. |
 | `MEDIA_DATA_DIR` | — | `media-manager/data` | The folder for the data |
 | `MEDIA_MAX_FILE_SIZE` | — | `52428800` (50 MB) | The maximum size of an uploaded file, in bytes |
+| `MEDIA_CORS_ORIGINS` | `--cors=` | *(not set)* | The websites that can use the API from a browser. Use a comma-separated list such as `https://www.example.com,http://localhost:5173`, or `*` for all websites. |
+| `MEDIA_PUBLIC_URL` | `--public-url=` | *(the address in the request)* | The public address of the server, for links in feeds. Example: `https://cms.example.com`. |
+| `MEDIA_TIMEZONE` | — | `UTC` | The time zone for all-day events in calendar feeds. Example: `Europe/London`. |
 
 Example with options (all terminals):
 
@@ -499,10 +526,11 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Problem | Cause | Action |
 | --- | --- | --- |
+| A website on a different address gets `blocked by CORS policy` in the browser console | The server does not allow that website. | Start the server with the address of the website: `npm start -- --token=dev-token --cors=http://localhost:5173`. |
 | PowerShell shows `The term 'MEDIA_API_TOKEN=dev-token' is not recognized`, or Command Prompt shows `'MEDIA_API_TOKEN' is not recognized as an internal or external command` | The `NAME=value command` form operates in `bash` and `zsh` only. | Use `npm run start:local` (step 3.1). Or use the command for your terminal from the table in step 3.1. |
 | The terminal shows `Could not read package.json` | The terminal is not in the `media-manager` folder. | Go to the folder: `cd stunning-octo-broccoli/media-manager`. Then enter the command again. |
 | `Port 1338 is already in use` | A different program uses port 1338. This can be a second Media Manager server. | Stop the other program. Or start with a different port: `npm start -- --token=dev-token --port=1339`. |
@@ -518,7 +546,7 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 ---
 
-## 12. Files and folders
+## 13. Files and folders
 
 ```
 media-manager/
@@ -530,6 +558,7 @@ media-manager/
 │   ├── streams.js       The Streams API: items, publish, schedules, relations, keys
 │   ├── schema.js        The field types and the validation
 │   ├── templates.js     The stream templates
+│   ├── formats.js       The calendar, RSS, JSON Feed, GeoJSON and CSV outputs
 │   ├── webhooks.js      The webhook deliveries and signatures
 │   ├── event-log.js     The storage of items (one file for each stream)
 │   ├── store.js         The storage of files, folders and stream definitions

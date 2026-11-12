@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.4.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.5.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.5:** **map pin** (`geopoint`) and **date** field types with map filters, nine new **templates** with schema.org types, **standard output formats** (iCalendar, RSS, JSON Feed, GeoJSON, CSV), `populate` for **media** fields, and **CORS** so websites can call the API from a browser.
+>
 > **New in 0.4:** **relations** between streams with `?populate`, **per-stream API keys** with scopes, and **scheduled publishing and unpublishing** (`publishAt` / `unpublishAt`). All 0.3 requests still work unchanged.
 >
 > **Changes from 0.2:** "events" are now called **items**, because a stream can hold any kind of record. `/events` still works as an alias of `/items`. In stream objects, `eventCount` and `lastEventAt` were renamed to `itemCount` and `lastItemAt`. 0.3 adds templates, display labels, draft & publish, new field types, unique constraints, retention and webhooks.
@@ -41,7 +43,7 @@ Both modules share one server, one admin UI, one API token and one data director
   | Credential | Can do |
   | --- | --- |
   | **Main token** (`MEDIA_API_TOKEN`) | Everything: all streams, stream settings, API keys, webhooks, the media library |
-  | **Stream API key** (`mmk_…`) | Only the item operations its scopes allow, on its own stream (§10). It can't change stream settings, keys or webhooks, or reach the media library. |
+  | **Stream API key** (`mmk_…`) | Only the item operations its scopes allow, on its own stream (§12). It can't change stream settings, keys or webhooks, or reach the media library. |
 
   Reads are public, with these exceptions:
   - **Drafts** are visible only with the main token or a key with the `read` scope.
@@ -103,7 +105,9 @@ In a batch, the paths are prefixed with the item's index: `[3].data.total`.
 | `enum` | One of `options` | `options` (1–200 strings, required) | string |
 | `tags` | Array of strings | none | array of unique trimmed strings (≤ 100 tags, ≤ 64 chars each); `[]` when empty |
 | `json` | Any JSON value | none | as sent |
-| `media` | The `id` of an existing media file | none | string (UUID) |
+| `media` | The `id` of an existing media file | none | string (UUID). `?populate` returns the file details (§3.3). |
+| `date` | A calendar date `YYYY-MM-DD` | none | string; impossible dates (2026-02-30) are rejected |
+| `geopoint` | A map pin: `{ "lat": 51.5, "lng": -0.12, "label": "London" }` | none | object; `lat` −90…90, `lng` −180…180, `label` ≤ 200 chars (optional) |
 | `relation` | The id of an item in the `target` stream, or an array of ids when `multiple` | `target` (stream slug, required), `multiple` (default `false`) | string, or array of unique ids (≤ 100); `[]` when empty and `multiple` |
 
 Every field can also have `required` (default `false`) and `description` (≤ 500 chars).
@@ -134,7 +138,7 @@ Every field can also have `required` (default `false`) and `description` (≤ 50
 The third example is a self-relation: a stream can relate to its own items.
 
 - **Writing:** send ids, e.g. `"author": "0b7c…"` or `"categories": ["a1…", "b2…"]`. Duplicate ids are removed.
-- **Reading:** items always store and return **ids**. Add `?populate=*` (all relation fields) or `?populate=author,categories` to a list or get request to replace them with the related items. Populating goes one level deep, and the related items keep their own relation ids.
+- **Reading:** items always store and return **ids**. Add `?populate=*` (all relation **and media** fields) or `?populate=author,cover` to a list or get request to replace them with the related items. Media fields become `{ id, name, url, mime, size, width, height, alternativeText, caption }`. Populating goes one level deep, and the related items keep their own relation ids.
 - **Visibility when populating:** drafts in the target stream are included only for requesters who can read drafts *in that stream*, meaning the main token or a key for that stream with `read`. Otherwise a single relation becomes `null` and drafts are left out of lists.
 - **Filtering:** `filter[author]=<id>` matches a single relation. `filter[categories]=<id>` matches items whose list contains that id, and `[ne]` matches items whose list doesn't.
 - **When a related item is deleted**, references to it are removed automatically: single relations become `null`, and the id is taken out of lists. This also applies to deletions by retention. Each changed item is sent as `updated` to subscribers, and to webhooks unless retention caused the deletion. A *required* relation can become empty this way; the item stays as it is but can't be re-published until the field is filled.
@@ -234,6 +238,17 @@ Values you send override the template's. The response is `201` with the stream o
 | `blog-posts` | posts | title, slug (uid from title), excerpt, body (richtext), cover (media), author, tags, featured | **on** | none |
 | `social-feed` | posts | author, text (≤ 2000), image (media), link (url), tags | off | none |
 | `products` | products | name, slug (uid from name), sku (unique), price, currency (enum), description (richtext), image, inStock, tags | **on** | none |
+| `events` | events | title, slug, start, end, allDay, venue, location (**pin**), description, image, url, status (scheduled/postponed/cancelled), tags | **on** | none |
+| `pages` | pages | title, slug, body, image, seoTitle (≤ 70), seoDescription (≤ 160) | **on** | none |
+| `announcements` | announcements | message (≤ 300), level (info/success/warning/critical), url, linkText | **on** | none |
+| `case-studies` | case studies | title, slug, client, industry, summary, challenge, solution, results (richtext), image, tags | **on** | none |
+| `faq` | questions | question, answer (richtext), category, order | **on** | none |
+| `testimonials` | testimonials | quote, name, role, company, photo, rating (1–5) | **on** | none |
+| `people` | people | name, slug, jobTitle, photo, bio, email, url, order | off | none |
+| `locations` | locations | name, address, location (**pin**, required), phone, email, openingHours, image, url | off | none |
+| `jobs` | jobs | title, slug, location, employmentType, remote, salaryMin/Max, currency, description, applyUrl, closingDate (**date**) | **on** | none |
+
+Every template has a `category` (Basic, Content, Business, Data) for grouping in the admin UI, and a `schemaType`: the schema.org type of its items (`Event`, `BlogPosting`, `WebPage`, `Article`, `Question`, `Review`, `Person`, `Place`, `JobPosting`, `Product`, `SocialMediaPosting`, or `null`). A stream copies `schemaType` from its template. You can set it on create or update to any schema.org type name, or to `null`. Embedded components use it to add structured data for search engines.
 
 ### 4.4 Update a stream: `PUT|PATCH /api/streams/:slug`
 
@@ -293,11 +308,13 @@ The fields must be inside `data`. A body like `{ "title": "A" }` is rejected wit
 | `page`, `pageSize` | `page=2&pageSize=100` | Default `pageSize` is 25, max 500 |
 | `sort` | `sort=data.price:asc` | Key: `timestamp`, `createdAt`, `updatedAt`, `publishedAt`, `publishAt`, `seq` or `data.<field>`. Direction: `:asc` (default) or `:desc`. Without `sort`, the order is `timestamp:desc`, or `seq:asc` when `after` is set. Empty values sort last; ties are broken by `seq`. |
 | `status` | `status=draft` | Draft & publish streams only. `published` (default), `draft` (includes scheduled), `scheduled` (drafts with a `publishAt`) or `all`. Everything except `published` needs the main token or a `read` key. |
-| `populate` | `populate=*` | Replace relation ids with the related items (§3.3) |
+| `populate` | `populate=*` | Replace relation and media ids with the related items and file details (§3.3) |
 | `since` / `until` | `since=2026-11-01T00:00:00Z` | `timestamp ≥ since` / `timestamp < until` |
 | `after` | `after=42` | `seq > 42`. Use it for polling (§9.2). |
 | `filter[<field>]` | `filter[slug]=hello-world` | Equals |
 | `filter[<field>][<op>]` | `filter[price][lte]=20` | Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`, `in` |
+| `filter[<pin>][within]` | `filter[location][within]=-10,40,10,60` | Map pins inside a box: `minLng,minLat,maxLng,maxLat`. A box with `minLng > maxLng` crosses the antimeridian. |
+| `filter[<pin>][near]` | `filter[location][near]=51.5,-0.12,25` | Map pins within a distance: `lat,lng,km` (great-circle distance) |
 
 Filter details:
 
@@ -306,6 +323,8 @@ Filter details:
 - `in` takes a comma-separated list: `filter[status][in]=pending,shipped`.
 - **Tags** fields: `eq`, `in` and `contains` match when **any** tag matches; `ne` matches when **no** tag equals the value. For example, `filter[tags]=news` returns items tagged `news`.
 - `gt`, `gte`, `lt` and `lte` never match empty values. All filters must match (AND).
+- **Map pin** fields support only `within` and `near`; other operators return `400`.
+- **Date** fields compare as `YYYY-MM-DD` text, so `filter[closingDate][gte]=2026-12-01` works as expected.
 - To fetch one item by its slug: `GET …/items?filter[slug]=hello-world`.
 - With curl, pass `-g` so the brackets are sent literally.
 
@@ -467,7 +486,73 @@ Returns a JSON Schema (draft 2020-12) for the item `data` object. Optional field
 
 ---
 
-## 10. Per-stream API keys
+## 10. Standard formats
+
+Every stream offers its **published** items in these formats. They are public reads, like `/items`, and accept the same filters, `since`/`until` and `sort`, plus `limit`.
+
+| Path | Format | Use | Default `limit` (max) |
+| --- | --- | --- | --- |
+| `…/feed.ics` | iCalendar (RFC 5545) | Subscribe in Google, Outlook or Apple Calendar | 10 000 |
+| `…/feed.rss` | RSS 2.0 | Feed readers, newsletters, automation tools | 50 |
+| `…/feed.json` | JSON Feed 1.1 | The same, as JSON | 50 |
+| `…/feed.geojson` | GeoJSON (RFC 7946) | Map tools; items without a map pin are left out | 10 000 |
+| `…/items.csv` | CSV (RFC 4180, UTF-8 with BOM) | Excel, Google Sheets; downloaded as `<slug>.csv` | 100 000 |
+
+**Field roles.** The formats find the right fields by their names and types, so most streams need no configuration:
+
+| Role | Field names looked for (case-insensitive; types) | Fallback |
+| --- | --- | --- |
+| title | title, name, headline, heading, label, question, subject, summary, message, client | first string or uid field, then `#seq` |
+| description | excerpt, summary, description, abstract, answer, quote, text, body, content, message, bio | none |
+| start / end | start, startDate, startsAt, begin, date… / end, endDate, endsAt, finish (datetime or date) | start: the item `timestamp` |
+| all-day | allDay (boolean) | a `date`-type start is always all-day |
+| venue | venue, location, address, place, city (string) | the map pin's `label` |
+| url | url, link, website, applyUrl, href (url) | the item's API URL |
+| map pin / image | the first `geopoint` / `media` field | none |
+
+To choose a field yourself, pass the role as a parameter, e.g. `feed.ics?start=kickoff&title=headline`. An unknown field name returns `400`.
+
+**Other parameters:**
+
+| Parameter | Example | Effect |
+| --- | --- | --- |
+| `link` | `link=https://www.example.com/blog/{slug}` | The URL of each item on your website. Placeholders: `{id}`, `{seq}`, `{slug}` (the uid field) or `{<field>}`. Must start with `http(s)://`. |
+| `site` | `site=https://www.example.com` | The feed's home page (RSS `<link>`, JSON Feed `home_page_url`) |
+| `tz` | `tz=Europe/London` | The time zone for **all-day** dates in `.ics` (default: `MEDIA_TIMEZONE`, else `UTC`). Timed events are always in UTC. |
+
+**Details per format:**
+
+- **iCalendar:**
+  - Each item becomes a `VEVENT` with `UID`, `DTSTART`/`DTEND`, `SUMMARY`, `DESCRIPTION`, `LOCATION`, `GEO` and `URL`.
+  - All-day events use `VALUE=DATE` with an exclusive end date.
+  - Markdown is converted to plain text.
+  - Lines are folded at 75 octets, and text is escaped as RFC 5545 requires.
+- **RSS / JSON Feed:**
+  - Tags become `<category>` / `tags`, and the image becomes an `<enclosure>` / `image`.
+  - JSON Feed also includes the item's raw data under `_media_manager`.
+- **GeoJSON:** coordinates are `[lng, lat]`, as GeoJSON requires. The item's other fields become `properties`, plus `title`, `url`, `seq` and `timestamp`.
+- **CSV:**
+  - The columns are `id`, `seq`, `timestamp`, `publishedAt` (on draft & publish streams), then one column per field.
+  - Lists are joined with `; `, and objects are written as JSON.
+  - Text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`, so a spreadsheet does not run them as formulas.
+- Absolute links use `MEDIA_PUBLIC_URL` when it is set. Otherwise they are built from the request's `Host` header (and `X-Forwarded-Proto`).
+- Responses carry `Cache-Control: public, max-age=60`.
+
+## 11. Cross-origin access (CORS)
+
+A website on another domain can call the API from the browser only if the server allows that website's origin. To allow it, start the server with `--cors=` or set `MEDIA_CORS_ORIGINS`:
+
+```bash
+npm start -- --token=… --cors=https://www.example.com,http://localhost:5173
+```
+
+- The value is a comma-separated list of origins (scheme, host and port, with no path), or `*` for any website. An invalid entry stops the server at startup with a clear message.
+- **Allowed origins** get `Access-Control-Allow-Origin` (plus `Vary: Origin`) on `/api/*`, `/uploads/*` and `/ui/*`. Preflight `OPTIONS` requests are answered with `204`, allowing all API methods and the `Authorization`, `Content-Type` and `Last-Event-ID` headers.
+- **Other origins** get no CORS headers, so browsers block their requests.
+- CORS does not replace authentication. Writes still need a token or key, and you should **never put the main token in website code**. For browser writes, use a stream key with only the scopes it needs.
+- `GET /api/config` returns the configured `corsOrigins`.
+
+## 12. Per-stream API keys
 
 Keys are managed with the main token, either in the admin UI (*Settings → API keys*) or through the API:
 
@@ -494,7 +579,7 @@ POST /api/streams/orders/keys
 - `lastUsedAt` is updated on use; it is saved to disk at most every 30 seconds.
 - A stream can have up to 50 keys.
 
-## 11. Media Library API (summary)
+## 13. Media Library API (summary)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -508,7 +593,7 @@ POST /api/streams/orders/keys
 | `GET` / `PUT` / `DELETE` | `/api/upload/folders/:id` | Get, rename or move, delete (`409` if not empty) |
 | `GET` | `/uploads/:file` | Serve the binary. Supports `Range`; add `?download` to download it as an attachment. |
 
-## 12. Other endpoints
+## 14. Other endpoints
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -517,7 +602,7 @@ POST /api/streams/orders/keys
 
 ---
 
-## 13. Admin UI
+## 15. Admin UI
 
 | Page | Path | Capabilities |
 | --- | --- | --- |
@@ -542,7 +627,7 @@ The selected stream and tab are kept in the URL (`/streams.html?stream=blog&tab=
 
 ---
 
-## 14. Storage & operations
+## 16. Storage & operations
 
 ```
 $MEDIA_DATA_DIR/
@@ -561,8 +646,13 @@ $MEDIA_DATA_DIR/
 | `MEDIA_API_TOKEN` | *(unset = everything open)* | Bearer token for writes and draft access |
 | `MEDIA_DATA_DIR` | `./data` | Data directory |
 | `MEDIA_MAX_FILE_SIZE` | `52428800` | Per-file upload limit in bytes |
+| `MEDIA_CORS_ORIGINS` (`--cors=`) | *(none)* | Websites allowed to call the API from a browser (§11) |
+| `MEDIA_PUBLIC_URL` (`--public-url=`) | *(from the Host header)* | Base URL for absolute links in feeds |
+| `MEDIA_TIMEZONE` | `UTC` | Default time zone for all-day dates in `.ics` feeds |
 
-## 15. Limits & non-goals (current version)
+`--token=`, `--port=`, `--host=`, `--cors=` and `--public-url=` can be passed after `npm start --`. They take priority over the environment variables.
+
+## 17. Limits & non-goals (current version)
 
 | Area | Limit / behavior |
 | --- | --- |
@@ -571,9 +661,10 @@ $MEDIA_DATA_DIR/
 | Content | Populating goes one level deep. No localization or version history. Markdown isn't rendered server-side. |
 | Scheduling | Precision is about 15 seconds. Schedules use absolute UTC times; there are no recurring schedules. |
 | Webhooks | The delivery queue lives in memory: pending retries are lost on restart. Redirects aren't followed. Destinations aren't restricted, so only token holders should be able to configure them. |
-| Rate limiting / CORS | Neither is built in. Put a reverse proxy in front if the API is exposed publicly or used across origins. |
+| Rate limiting | Not built in. Put a reverse proxy in front if the API is exposed publicly. |
+| Maps | The server stores and filters pins but doesn't geocode addresses (convert an address into coordinates). |
 
-## 16. Possible next steps
+## 18. Possible next steps
 
 - Aggregations (`count`, `sum` and `avg` grouped by field or time bucket) and CSV / NDJSON export
 - Version history (restore an earlier version of an item)

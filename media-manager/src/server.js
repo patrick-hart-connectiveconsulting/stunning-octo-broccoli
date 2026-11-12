@@ -428,11 +428,28 @@ function formatBytes(n) {
   return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
 }
 
-// Start when run directly: `node src/server.js`
+// Start when run directly: `node src/server.js [--token=…] [--port=…] [--host=…]`.
+// The options work the same in every shell (bash, PowerShell, cmd.exe) and
+// take precedence over the matching environment variables.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 1338);
-  const host = process.env.HOST || '0.0.0.0';
-  const { server, config } = await createApp();
+  const OPTIONS = { token: 'MEDIA_API_TOKEN', port: 'PORT', host: 'HOST' };
+  const args = {};
+  for (const arg of process.argv.slice(2)) {
+    const m = /^--([a-z-]+)=(.*)$/.exec(arg);
+    if (!m || !(m[1] in OPTIONS)) {
+      console.error(`Unknown option "${arg}". Supported: ${Object.keys(OPTIONS).map((k) => `--${k}=…`).join(', ')}`);
+      process.exit(1);
+    }
+    args[m[1]] = m[2];
+  }
+  const port = Number(args.port || process.env.PORT || 1338);
+  const host = args.host || process.env.HOST || '0.0.0.0';
+  const { server, config } = await createApp({ token: args.token });
+  server.on('error', (err) => {
+    if (err.code !== 'EADDRINUSE') throw err;
+    console.error(`Port ${port} is already in use. Stop the other program, or use another port: npm start -- --port=${port + 1}`);
+    process.exit(1);
+  });
   server.listen(port, host, () => {
     console.log(`Media manager running at http://localhost:${port}`);
     console.log(config.token ? 'API token required for write operations.' : 'Warning: MEDIA_API_TOKEN not set — write API is open.');

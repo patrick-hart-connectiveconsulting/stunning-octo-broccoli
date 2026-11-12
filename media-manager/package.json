@@ -7,7 +7,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:local": "node src/server.js --token=dev-token",
     "dev": "node --watch src/server.js",
+    "dev:local": "node --watch src/server.js --token=dev-token",
     "test": "node --test test/*.test.js"
   },
   "engines": {

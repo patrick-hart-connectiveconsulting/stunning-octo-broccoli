@@ -4,18 +4,19 @@
 //   /api/streams                              list / create streams
 //   /api/streams/:slug                        get / update / delete a stream; POST = new item
 //   /api/streams/:slug/schema                 JSON Schema for the stream's item data
-//   /api/streams/:slug/items                  list (filter, sort, paginate) / create items
+//   /api/streams/:slug/items                  list (filter, sort, populate, paginate) / create items
 //   /api/streams/:slug/items/:id              get / update / delete one item
 //   /api/streams/:slug/items/:id/publish      publish (draft & publish streams)
 //   /api/streams/:slug/items/:id/unpublish    back to draft
 //   /api/streams/:slug/subscribe              live Server-Sent Events feed
 //   /api/streams/:slug/webhooks/:id/test      send a test delivery
+//   /api/streams/:slug/keys[/:id]             per-stream API keys
 //
 // `/events` is accepted everywhere `/items` is (the original name).
 
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 
 import { HttpError, send, readJson, paginate } from './http.js';
 import { EventLog } from './event-log.js';
@@ -27,6 +28,9 @@ const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const MAX_BATCH = 1000;
 const FILTER_KEY = /^filter\[([A-Za-z_][A-Za-z0-9_]*)\](?:\[(eq|ne|gt|gte|lt|lte|contains|in)\])?$/;
 const DAY = 86400000;
+const KEY_PREFIX = 'mmk_';
+export const KEY_SCOPES = ['read', 'create', 'update', 'delete'];
+const MAX_KEYS = 50;
 
 export function slugify(text) {
   return String(text)
@@ -42,6 +46,8 @@ export function slugify(text) {
 const fail = (status, message, errors) => {
   throw new HttpError(status, message, errors ? { errors } : undefined);
 };
+const nowIso = () => new Date().toISOString();
+const hashKey = (key) => createHash('sha256').update(key).digest('hex');
 
 function normalizeLabels(input) {
   if (input === undefined || input === null) return { singular: 'item', plural: 'items' };
@@ -76,17 +82,21 @@ function upgradeStream(stream) {
   stream.draftAndPublish ??= false;
   stream.retention ??= { maxItems: null, maxAgeDays: null };
   stream.webhooks ??= [];
+  stream.apiKeys ??= [];
   return stream;
 }
 
-export async function createStreamsApi({ store, dataDir, authorize, isAuthorized, webhookOptions = {} }) {
+export async function createStreamsApi({ store, dataDir, isMaster, bearer, webhookOptions = {}, schedulerIntervalMs = 15000 }) {
   const eventDir = join(dataDir, 'events');
   await mkdir(eventDir, { recursive: true });
 
   const logs = new Map(); // stream id -> EventLog
+  const scheduled = new Map(); // "streamId:itemId" -> { streamId, id }, items with publishAt/unpublishAt
   for (const stream of store.data.streams) {
     upgradeStream(stream);
-    logs.set(stream.id, await new EventLog(join(eventDir, `${stream.id}.jsonl`)).load());
+    const log = await new EventLog(join(eventDir, `${stream.id}.jsonl`)).load();
+    logs.set(stream.id, log);
+    for (const item of log.events.values()) track(stream, item);
   }
 
   const subscribers = new Map(); // stream id -> Set<{ res, authed }>
@@ -108,6 +118,55 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   }, 3600000);
   sweeper.unref();
 
+  // ---- auth: main token or per-stream API keys -----------------------------
+
+  let keyIndex = new Map(); // sha256(key) -> { streamId, keyId }
+  const rebuildKeyIndex = () => {
+    keyIndex = new Map();
+    for (const s of store.data.streams) for (const k of s.apiKeys) keyIndex.set(k.hash, { streamId: s.id, keyId: k.id });
+  };
+  rebuildKeyIndex();
+
+  // lastUsedAt is updated in memory and flushed at most every 30 s.
+  let touchTimer = null;
+  const touchKey = (key) => {
+    key.lastUsedAt = nowIso();
+    if (touchTimer) return;
+    touchTimer = setTimeout(() => {
+      touchTimer = null;
+      store.flush().catch(() => {});
+    }, 30000);
+    touchTimer.unref();
+  };
+
+  /** The API key presented with this request, if it is valid for `stream`. */
+  function keyFor(req, url, stream) {
+    const token = bearer(req) || url?.searchParams.get('access_token') || '';
+    if (!token.startsWith(KEY_PREFIX)) return null;
+    const hit = keyIndex.get(hashKey(token));
+    if (!hit || hit.streamId !== stream.id) return null;
+    const key = stream.apiKeys.find((k) => k.id === hit.keyId);
+    if (!key || (key.expiresAt && key.expiresAt <= nowIso())) return null;
+    touchKey(key);
+    return key;
+  }
+
+  /** True if the request holds the main token, or a key for this stream with `scope`. */
+  const can = (req, stream, scope, url) => isMaster(req, url) || Boolean(keyFor(req, url, stream)?.scopes.includes(scope));
+
+  function requireScope(req, stream, scope) {
+    if (isMaster(req)) return;
+    const key = keyFor(req, null, stream);
+    if (!key) fail(401, 'Missing or invalid API token or key');
+    if (!key.scopes.includes(scope)) fail(403, `This API key does not have the "${scope}" scope`);
+  }
+
+  function requireMaster(req) {
+    if (!isMaster(req)) fail(401, 'This action needs the main API token (MEDIA_API_TOKEN), not a stream key');
+  }
+
+  const publicKey = ({ hash, ...key }) => key;
+
   // ---- helpers -------------------------------------------------------------
 
   const getStreamOr404 = (slug) => {
@@ -118,27 +177,30 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
 
   const isVisible = (stream, item) => !stream.draftAndPublish || item.publishedAt != null;
 
-  const summary = (stream, authed) => {
+  const summary = (stream, { master = false, read = master } = {}) => {
     const log = logs.get(stream.id);
     let itemCount = 0;
     let draftCount = 0;
+    let scheduledCount = 0;
     let lastItemAt = null;
     for (const item of log.events.values()) {
       const visible = isVisible(stream, item);
       if (!visible) draftCount++;
-      if (!visible && !authed) continue;
+      if (!visible && item.publishAt) scheduledCount++;
+      if (!visible && !read) continue;
       itemCount++;
       if (!lastItemAt || item.timestamp > lastItemAt) lastItemAt = item.timestamp;
     }
-    const { webhooks: hooks, ...rest } = stream;
+    const { webhooks: hooks, apiKeys, ...rest } = stream;
     return {
       ...rest,
       itemCount,
-      ...(stream.draftAndPublish && authed ? { draftCount } : {}),
+      ...(stream.draftAndPublish && read ? { draftCount, scheduledCount } : {}),
       lastItemAt,
-      ...(authed ? { webhooks: hooks } : {}),
+      ...(master ? { webhooks: hooks, apiKeys: apiKeys.map(publicKey) } : {}),
     };
   };
+  const summaryFor = (req, stream) => summary(stream, { master: isMaster(req), read: can(req, stream, 'read') });
 
   const optionalText = (value, path, max) => {
     if (value === undefined) return undefined;
@@ -148,14 +210,35 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     return value.trim();
   };
 
-  const parseTimestamp = (value, path) => {
-    if (value === undefined || value === null) return new Date().toISOString();
+  const parseDate = (value, path, { nullable = false } = {}) => {
+    if (value === null && nullable) return null;
     const d = typeof value === 'string' || typeof value === 'number' ? new Date(value) : null;
-    if (!d || Number.isNaN(d.getTime())) fail(400, 'Validation failed', [{ path, message: 'must be an ISO 8601 date-time' }]);
+    if (!d || Number.isNaN(d.getTime())) fail(400, 'Validation failed', [{ path, message: `must be an ISO 8601 date-time${nullable ? ' or null' : ''}` }]);
     return d.toISOString();
   };
+  const parseTimestamp = (value, path) => (value === undefined || value === null ? nowIso() : parseDate(value, path));
 
   const mediaExists = (id) => Boolean(store.getFile(id));
+  const relationExists = (field, id) => {
+    const target = store.data.streams.find((s) => s.slug === field.target);
+    return Boolean(target && logs.get(target.id)?.get(id));
+  };
+
+  /** Relation targets must be existing streams (or the stream itself). */
+  function checkRelationTargets(fields, selfSlug) {
+    const errors = [];
+    fields.forEach((f, i) => {
+      if (f.type !== 'relation') return;
+      if (f.target !== selfSlug && !store.data.streams.some((s) => s.slug === f.target)) {
+        errors.push({ path: `fields[${i}].target`, message: `stream "${f.target}" does not exist` });
+      }
+    });
+    return errors.length ? { errors } : {};
+  }
+
+  /** Streams (other than itself) with a relation field pointing at `stream`. */
+  const referencingStreams = (stream) =>
+    store.data.streams.filter((s) => s.id !== stream.id && s.fields.some((f) => f.type === 'relation' && f.target === stream.slug));
 
   /** value -> item id, for every unique/uid field. Built once per request. */
   function uniqueIndex(stream) {
@@ -173,8 +256,8 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
 
   /**
    * Validates item data: generates empty uid fields from their target field,
-   * checks types/required, then enforces uniqueness (bumping generated uids
-   * with -2, -3… instead of failing). Reserves the values in `index`.
+   * checks types/required/relations, then enforces uniqueness (bumping
+   * generated uids with -2, -3… instead of failing). Reserves values in `index`.
    */
   function prepareData(stream, raw, { id, index, enforceRequired, prefix = '' }) {
     let data = raw;
@@ -192,7 +275,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       }
     }
 
-    const result = validateData(stream.fields, data, { mediaExists, enforceRequired });
+    const result = validateData(stream.fields, data, { mediaExists, relationExists, enforceRequired });
     if (result.errors) fail(400, 'Validation failed', result.errors.map((e) => ({ ...e, path: prefix + e.path })));
     const out = result.data;
 
@@ -217,6 +300,58 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   /** Keeps only keys that are fields of the stream (drops data of removed fields). */
   const currentKeys = (stream, data) =>
     stream.fields.length ? Object.fromEntries(stream.fields.filter((f) => f.name in data).map((f) => [f.name, data[f.name]])) : { ...data };
+
+  // ---- writing items -------------------------------------------------------
+
+  function track(stream, item) {
+    const key = `${stream.id}:${item.id}`;
+    if (item.publishAt || item.unpublishAt) scheduled.set(key, { streamId: stream.id, id: item.id });
+    else scheduled.delete(key);
+  }
+
+  async function putItems(stream, items) {
+    await logs.get(stream.id).put(items);
+    for (const item of items) track(stream, item);
+  }
+
+  /** Deletes items, notifies, and clears references to them from other items. */
+  async function removeItems(stream, items, { webhook = true } = {}) {
+    if (!items.length) return;
+    await logs.get(stream.id).remove(items.map((i) => i.id));
+    for (const item of items) {
+      scheduled.delete(`${stream.id}:${item.id}`);
+      notify(stream, 'deleted', item, { wasVisible: isVisible(stream, item), webhook });
+    }
+    await cleanupReferences(stream, items.map((i) => i.id), { webhook });
+  }
+
+  /** Removes deleted ids from relation fields that point at `target` (single → null, multiple → filtered). */
+  async function cleanupReferences(target, ids, { webhook }) {
+    const gone = new Set(ids);
+    for (const s of store.data.streams) {
+      const rel = s.fields.filter((f) => f.type === 'relation' && f.target === target.slug);
+      if (!rel.length) continue;
+      const changed = [];
+      for (const item of logs.get(s.id).events.values()) {
+        if (s.id === target.id && gone.has(item.id)) continue;
+        let data = null;
+        for (const f of rel) {
+          const v = item.data?.[f.name];
+          if (f.multiple && Array.isArray(v) && v.some((id) => gone.has(id))) {
+            data ??= { ...item.data };
+            data[f.name] = v.filter((id) => !gone.has(id));
+          } else if (!f.multiple && typeof v === 'string' && gone.has(v)) {
+            data ??= { ...item.data };
+            data[f.name] = null;
+          }
+        }
+        if (data) changed.push({ ...item, data, updatedAt: nowIso() });
+      }
+      if (!changed.length) continue;
+      await putItems(s, changed);
+      for (const c of changed) notify(s, 'updated', c, { wasVisible: isVisible(s, c), webhook });
+    }
+  }
 
   // ---- change notifications (SSE + webhooks) -------------------------------
 
@@ -248,13 +383,13 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
 
   function notifyStream(stream, type, payload) {
     for (const sub of subscribers.get(stream.id) || []) {
-      const body = type === 'stream-updated' ? summary(stream, sub.authed) : payload;
+      const body = type === 'stream-updated' ? summary(stream, { read: sub.authed }) : payload;
       sub.res.write(`event: ${type}\ndata: ${JSON.stringify(body)}\n\n`);
     }
   }
 
   function subscribe(req, res, stream, url) {
-    const authed = isAuthorized(req, url);
+    const authed = can(req, stream, 'read', url);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
@@ -302,20 +437,109 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       items.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : a.seq - b.seq));
       victims.push(...items.slice(0, items.length - maxItems));
     }
-    if (!victims.length) return 0;
-    await log.remove(victims.map((v) => v.id));
-    for (const v of victims) notify(stream, 'deleted', v, { wasVisible: isVisible(stream, v), webhook: false });
+    await removeItems(stream, victims, { webhook: false });
     return victims.length;
   }
+
+  // ---- scheduled publishing ------------------------------------------------
+
+  /**
+   * Applies publishAt / unpublishAt from a request body to an item's status
+   * fields. Times in the past take effect immediately.
+   */
+  function applySchedule(stream, body, status, prefix = '') {
+    const out = { ...status };
+    const has = (k) => body[k] !== undefined;
+    if (!has('publishAt') && !has('unpublishAt')) return out;
+    if (!stream.draftAndPublish) fail(400, 'Scheduling needs draft & publish to be enabled for this stream');
+    const now = nowIso();
+    const bad = (path, message) => fail(400, 'Validation failed', [{ path: prefix + path, message }]);
+
+    if (has('publishAt')) {
+      const at = parseDate(body.publishAt, `${prefix}publishAt`, { nullable: true });
+      if (at && body.publish === true) bad('publishAt', 'use either publish or publishAt, not both');
+      if (at && out.publishedAt) bad('publishAt', 'the item is already published — unpublish it first, or set unpublishAt');
+      if (at && at <= now) {
+        out.publishedAt = now;
+        out.publishAt = null;
+      } else {
+        out.publishAt = at;
+      }
+      if (at) out.scheduleError = null;
+    }
+    if (has('unpublishAt')) {
+      const at = parseDate(body.unpublishAt, `${prefix}unpublishAt`, { nullable: true });
+      if (at) {
+        if (!out.publishedAt && !out.publishAt) bad('unpublishAt', 'needs an item that is published or scheduled to publish');
+        if (out.publishAt && at <= out.publishAt) bad('unpublishAt', 'must be after publishAt');
+        if (at <= now) {
+          out.publishedAt = null;
+          out.unpublishAt = null;
+        } else {
+          out.unpublishAt = at;
+        }
+      } else {
+        out.unpublishAt = null;
+      }
+    }
+    return out;
+  }
+
+  let schedulerBusy = false;
+  async function runScheduler() {
+    if (schedulerBusy) return;
+    schedulerBusy = true;
+    try {
+      const now = nowIso();
+      for (const [key, ref] of [...scheduled]) {
+        const stream = store.getStream(ref.streamId);
+        let item = stream && logs.get(stream.id)?.get(ref.id);
+        if (!item) {
+          scheduled.delete(key);
+          continue;
+        }
+        if (!stream.draftAndPublish) continue;
+
+        if (item.publishAt && item.publishAt <= now) {
+          const wasVisible = isVisible(stream, item);
+          const check = validateData(stream.fields, currentKeys(stream, item.data), { mediaExists, relationExists, enforceRequired: true });
+          if (check.errors) {
+            item = {
+              ...item,
+              publishAt: null,
+              scheduleError: `Scheduled publish failed: ${check.errors.map((e) => `${e.path} ${e.message}`).join('; ')}`,
+              updatedAt: now,
+            };
+            await putItems(stream, [item]);
+            notify(stream, 'updated', item, { wasVisible });
+            continue;
+          }
+          item = { ...item, publishedAt: now, publishAt: null, scheduleError: null, updatedAt: now };
+          await putItems(stream, [item]);
+          notify(stream, 'published', item, { wasVisible });
+        }
+        if (item.unpublishAt && item.unpublishAt <= now) {
+          const wasVisible = isVisible(stream, item);
+          item = { ...item, publishedAt: null, unpublishAt: null, updatedAt: now };
+          await putItems(stream, [item]);
+          notify(stream, wasVisible ? 'unpublished' : 'updated', item, { wasVisible });
+        }
+      }
+    } finally {
+      schedulerBusy = false;
+    }
+  }
+  const scheduler = setInterval(() => runScheduler().catch((err) => console.error('scheduler', err)), schedulerIntervalMs);
+  scheduler.unref();
+  runScheduler().catch(() => {}); // catch up on anything that fell due while the server was down
 
   // ---- streams -------------------------------------------------------------
 
   async function listStreams(req, res, url) {
-    const authed = isAuthorized(req);
     const q = (url.searchParams.get('q') || '').toLowerCase();
     let items = store.data.streams;
     if (q) items = items.filter((s) => s.name.toLowerCase().includes(q) || s.slug.includes(q));
-    items = [...items].sort((a, b) => a.name.localeCompare(b.name)).map((s) => summary(s, authed));
+    items = [...items].sort((a, b) => a.name.localeCompare(b.name)).map((s) => summaryFor(req, s));
     send(res, 200, paginate(items, url, { defaultSize: 100, maxSize: 500 }));
   }
 
@@ -325,7 +549,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   }
 
   async function createStream(req, res) {
-    authorize(req);
+    requireMaster(req);
     const body = await readJson(req);
     const name = optionalText(body.name, 'name', 100);
     if (!name) fail(400, 'Validation failed', [{ path: 'name', message: 'is required' }]);
@@ -344,6 +568,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     const r = normalizeRetention(body.retention ?? template.retention);
     const w = normalizeWebhooks(body.webhooks);
     collect([f, l, r, w]);
+    collect([checkRelationTargets(f.fields, slug)]);
     if (body.draftAndPublish !== undefined && typeof body.draftAndPublish !== 'boolean') fail(400, 'draftAndPublish must be a boolean');
 
     const stream = await store.addStream({
@@ -356,13 +581,14 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       retention: r.retention,
       fields: f.fields,
       webhooks: w.webhooks,
+      apiKeys: [],
     });
     logs.set(stream.id, await new EventLog(join(eventDir, `${stream.id}.jsonl`)).load());
-    send(res, 201, summary(stream, true));
+    send(res, 201, summary(stream, { master: true }));
   }
 
   async function updateStream(req, res, stream) {
-    authorize(req);
+    requireMaster(req);
     const body = await readJson(req);
     const patch = {};
     if (body.slug !== undefined && body.slug !== stream.slug) {
@@ -381,6 +607,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     if (body.webhooks !== undefined) results.push(normalizeWebhooks(body.webhooks, stream.webhooks));
     collect(results);
     for (const r of results) Object.assign(patch, r);
+    if (patch.fields) collect([checkRelationTargets(patch.fields, stream.slug)]);
     if (body.draftAndPublish !== undefined) {
       if (typeof body.draftAndPublish !== 'boolean') fail(400, 'draftAndPublish must be a boolean');
       patch.draftAndPublish = body.draftAndPublish;
@@ -389,21 +616,28 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     // Turning draft & publish on: items written before it existed count as published.
     if (patch.draftAndPublish && !stream.draftAndPublish) {
       const legacy = logs.get(stream.id).all().filter((i) => i.publishedAt === undefined);
-      if (legacy.length) await logs.get(stream.id).put(legacy.map((i) => ({ ...i, publishedAt: i.createdAt })));
+      if (legacy.length) await putItems(stream, legacy.map((i) => ({ ...i, publishedAt: i.createdAt })));
     }
 
     const updated = await store.updateStream(stream.id, patch);
     if (patch.retention) await enforceRetention(updated);
     notifyStream(updated, 'stream-updated');
-    send(res, 200, summary(updated, true));
+    send(res, 200, summary(updated, { master: true }));
   }
 
   async function deleteStream(req, res, stream) {
-    authorize(req);
-    const result = summary(stream, true);
+    requireMaster(req);
+    const refs = referencingStreams(stream);
+    if (refs.length) {
+      const where = refs.map((s) => `"${s.slug}" (${s.fields.filter((f) => f.type === 'relation' && f.target === stream.slug).map((f) => f.name).join(', ')})`).join('; ');
+      fail(409, `Other streams have relation fields pointing at this stream: ${where}. Remove those fields first.`);
+    }
+    const result = summary(stream, { master: true });
     await store.removeStream(stream.id);
     await logs.get(stream.id).destroy();
     logs.delete(stream.id);
+    for (const key of [...scheduled.keys()]) if (key.startsWith(`${stream.id}:`)) scheduled.delete(key);
+    rebuildKeyIndex();
     notifyStream(stream, 'stream-deleted', { id: stream.id, slug: stream.slug });
     for (const sub of subscribers.get(stream.id) || []) sub.res.end();
     subscribers.delete(stream.id);
@@ -414,7 +648,8 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     const properties = {};
     for (const f of stream.fields) {
       const schema = fieldJsonSchema(f);
-      properties[f.name] = f.required || f.type === 'tags' ? schema : { anyOf: [schema, { type: 'null' }] };
+      const listLike = f.type === 'tags' || (f.type === 'relation' && f.multiple);
+      properties[f.name] = f.required || listLike ? schema : { anyOf: [schema, { type: 'null' }] };
     }
     return {
       $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -433,13 +668,84 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   }
 
   async function testWebhook(req, res, stream, hookId) {
-    authorize(req);
+    requireMaster(req);
     const hook = stream.webhooks.find((w) => w.id === hookId);
     if (!hook) fail(404, 'Webhook not found');
     const result = await webhooks.test(stream, hook);
     hook.lastDelivery = result;
     await store.flush();
     send(res, 200, result);
+  }
+
+  // ---- API keys --------------------------------------------------------------
+
+  function parseKeyInput(body, existing) {
+    const out = {};
+    const errors = [];
+    if (body.name !== undefined || !existing) {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name || name.length > 100) errors.push({ path: 'name', message: 'must be 1–100 characters' });
+      out.name = name;
+    }
+    if (body.scopes !== undefined || !existing) {
+      const scopes = body.scopes;
+      if (!Array.isArray(scopes) || !scopes.length || scopes.some((s) => !KEY_SCOPES.includes(s))) {
+        errors.push({ path: 'scopes', message: `must be a non-empty list of: ${KEY_SCOPES.join(', ')}` });
+      } else {
+        out.scopes = KEY_SCOPES.filter((s) => scopes.includes(s));
+      }
+    }
+    if (body.expiresAt !== undefined) {
+      if (body.expiresAt === null) out.expiresAt = null;
+      else {
+        const d = new Date(body.expiresAt);
+        if (Number.isNaN(d.getTime()) || d.toISOString() <= nowIso()) errors.push({ path: 'expiresAt', message: 'must be a future ISO 8601 date-time, or null' });
+        else out.expiresAt = d.toISOString();
+      }
+    }
+    if (errors.length) fail(400, 'Validation failed', errors);
+    return out;
+  }
+
+  async function keysRoute(req, res, stream, parts, m) {
+    requireMaster(req);
+    if (parts.length === 2) {
+      if (m === 'GET') return send(res, 200, { data: stream.apiKeys.map(publicKey) });
+      if (m !== 'POST') fail(405, 'Method not allowed');
+      if (stream.apiKeys.length >= MAX_KEYS) fail(400, `At most ${MAX_KEYS} API keys per stream`);
+      const input = parseKeyInput(await readJson(req));
+      const secret = KEY_PREFIX + randomBytes(24).toString('base64url');
+      const key = {
+        id: randomUUID(),
+        name: input.name,
+        prefix: secret.slice(0, 12),
+        scopes: input.scopes,
+        expiresAt: input.expiresAt ?? null,
+        createdAt: nowIso(),
+        lastUsedAt: null,
+        hash: hashKey(secret),
+      };
+      stream.apiKeys.push(key);
+      await store.flush();
+      rebuildKeyIndex();
+      // The full key is returned only once.
+      return send(res, 201, { ...publicKey(key), key: secret });
+    }
+    const key = stream.apiKeys.find((k) => k.id === parts[2]);
+    if (!key) fail(404, 'API key not found');
+    if (m === 'GET') return send(res, 200, publicKey(key));
+    if (m === 'PATCH' || m === 'PUT') {
+      Object.assign(key, parseKeyInput(await readJson(req), key));
+      await store.flush();
+      return send(res, 200, publicKey(key));
+    }
+    if (m === 'DELETE') {
+      stream.apiKeys = stream.apiKeys.filter((k) => k.id !== key.id);
+      await store.flush();
+      rebuildKeyIndex();
+      return send(res, 200, publicKey(key));
+    }
+    fail(405, 'Method not allowed');
   }
 
   // ---- items ---------------------------------------------------------------
@@ -473,25 +779,54 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     return (item) =>
       filters.every(({ name, op, raw, type }) => {
         const v = item.data?.[name];
-        // Arrays (tags): eq / in / contains match if any element matches; ne if none does.
+        // Arrays (tags, multiple relations): eq / in / contains match if any element matches; ne if none does.
         if (Array.isArray(v) && type !== 'json') {
           if (op === 'ne') return !v.some((el) => compare(el, 'eq', raw, 'string'));
           return v.some((el) => compare(el, op, raw, 'string'));
         }
-        return compare(v, op, raw, type);
+        return compare(v, op, raw, type === 'relation' ? 'string' : type);
       });
   }
 
+  /** Replaces relation ids with the related items for `?populate=*` or `?populate=a,b`. */
+  function populate(req, stream, items, url) {
+    const param = url.searchParams.get('populate');
+    if (!param) return items;
+    const relations = stream.fields.filter((f) => f.type === 'relation');
+    const names = param === '*' ? relations.map((f) => f.name) : param.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const n of names) if (!relations.some((f) => f.name === n)) fail(400, `Cannot populate "${n}": not a relation field`);
+
+    const resolvers = relations.filter((f) => names.includes(f.name)).map((f) => {
+      const target = store.data.streams.find((s) => s.slug === f.target);
+      const log = target && logs.get(target.id);
+      const seeDrafts = target && can(req, target, 'read');
+      const resolve = (id) => {
+        const it = log?.get(id);
+        if (!it || (!seeDrafts && !isVisible(target, it))) return null;
+        return it;
+      };
+      return [f, resolve];
+    });
+    return items.map((item) => {
+      const data = { ...item.data };
+      for (const [f, resolve] of resolvers) {
+        const v = data[f.name];
+        data[f.name] = f.multiple ? (Array.isArray(v) ? v.map(resolve).filter(Boolean) : []) : v ? resolve(v) : null;
+      }
+      return { ...item, data };
+    });
+  }
+
   function listItems(req, res, stream, url) {
-    const authed = isAuthorized(req);
     let items = logs.get(stream.id).all();
 
     if (stream.draftAndPublish) {
       const status = url.searchParams.get('status') || 'published';
-      if (!['published', 'draft', 'all'].includes(status)) fail(400, 'status must be published, draft or all');
-      if (status !== 'published' && !authed) fail(401, 'An API token is required to read drafts');
+      if (!['published', 'draft', 'scheduled', 'all'].includes(status)) fail(400, 'status must be published, draft, scheduled or all');
+      if (status !== 'published' && !can(req, stream, 'read')) fail(401, 'Reading drafts needs the API token or a key with the "read" scope');
       if (status === 'published') items = items.filter((i) => i.publishedAt != null);
       if (status === 'draft') items = items.filter((i) => i.publishedAt == null);
+      if (status === 'scheduled') items = items.filter((i) => i.publishedAt == null && i.publishAt);
     }
 
     const bound = (param) => {
@@ -519,12 +854,12 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     const [key, dir = 'asc'] = (url.searchParams.get('sort') || defaultSort).split(':');
     const sign = dir === 'desc' ? -1 : 1;
     let get;
-    if (['timestamp', 'createdAt', 'updatedAt', 'publishedAt', 'seq'].includes(key)) get = (e) => e[key];
+    if (['timestamp', 'createdAt', 'updatedAt', 'publishedAt', 'publishAt', 'seq'].includes(key)) get = (e) => e[key];
     else if (key.startsWith('data.')) {
       const name = key.slice(5);
       if (stream.fields.length && !stream.fields.some((f) => f.name === name)) fail(400, `Cannot sort by unknown field "${name}"`);
       get = (e) => e.data?.[name];
-    } else fail(400, 'sort must be timestamp, createdAt, updatedAt, publishedAt, seq or data.<field>, optionally with :asc or :desc');
+    } else fail(400, 'sort must be timestamp, createdAt, updatedAt, publishedAt, publishAt, seq or data.<field>, optionally with :asc or :desc');
 
     items.sort((a, b) => {
       const av = get(a);
@@ -536,17 +871,18 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       return cmp * sign || (a.seq - b.seq) * sign;
     });
 
-    send(res, 200, paginate(items, url, { defaultSize: 25, maxSize: 500 }));
+    const page = paginate(items, url, { defaultSize: 25, maxSize: 500 });
+    send(res, 200, { ...page, data: populate(req, stream, page.data, url) });
   }
 
-  function getItemOr404(stream, id, req) {
+  function getItem(req, res, stream, id, url) {
     const item = logs.get(stream.id).get(id);
-    if (!item || (!isVisible(stream, item) && !isAuthorized(req))) fail(404, 'Item not found');
-    return item;
+    if (!item || (!isVisible(stream, item) && !can(req, stream, 'read'))) fail(404, 'Item not found');
+    send(res, 200, populate(req, stream, [item], url)[0]);
   }
 
   async function createItems(req, res, stream) {
-    authorize(req);
+    requireScope(req, stream, 'create');
     const body = await readJson(req, 10 * 1024 * 1024);
     const batch = Array.isArray(body);
     const inputs = batch ? body : [body];
@@ -555,7 +891,8 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
 
     // Validate everything first so a batch is all-or-nothing.
     const index = uniqueIndex(stream);
-    const now = new Date().toISOString();
+    const now = nowIso();
+    const dp = stream.draftAndPublish;
     const prepared = inputs.map((input, i) => {
       const prefix = batch ? `[${i}].` : '';
       if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -565,37 +902,41 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       if (input.publish !== undefined && typeof input.publish !== 'boolean') {
         fail(400, 'Validation failed', [{ path: `${prefix}publish`, message: 'must be true or false' }]);
       }
-      const publish = !stream.draftAndPublish || input.publish === true;
+      const status = applySchedule(stream, input, {
+        publishedAt: !dp || input.publish === true ? now : null,
+        publishAt: null,
+        unpublishAt: null,
+      }, prefix);
       const id = randomUUID();
       return {
         id,
-        data: prepareData(stream, input.data, { id, index, enforceRequired: publish, prefix }),
+        status,
+        data: prepareData(stream, input.data, { id, index, enforceRequired: status.publishedAt != null || status.publishAt != null, prefix }),
         timestamp: parseTimestamp(input.timestamp, `${prefix}timestamp`),
-        publishedAt: publish ? now : null,
       };
     });
 
     const log = logs.get(stream.id);
-    const items = prepared.map(({ id, data, timestamp, publishedAt }) => ({
+    const items = prepared.map(({ id, data, timestamp, status }) => ({
       id,
       seq: log.nextSeq(),
       stream: stream.slug,
       timestamp,
       data,
-      publishedAt,
+      publishedAt: status.publishedAt,
+      ...(dp ? { publishAt: status.publishAt, unpublishAt: status.unpublishAt } : {}),
       createdAt: now,
       updatedAt: now,
     }));
-    await log.put(items);
+    await putItems(stream, items);
     for (const item of items) notify(stream, 'created', item);
     await enforceRetention(stream);
     send(res, 201, batch ? items : items[0]);
   }
 
   async function updateItem(req, res, stream, id, merge) {
-    authorize(req);
-    const log = logs.get(stream.id);
-    const existing = log.get(id);
+    requireScope(req, stream, 'update');
+    const existing = logs.get(stream.id).get(id);
     if (!existing) fail(404, 'Item not found');
     const body = await readJson(req, 10 * 1024 * 1024);
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'Body must be an object like { "data": { … } }');
@@ -603,14 +944,27 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     if (body.publish !== undefined && typeof body.publish !== 'boolean') fail(400, 'Validation failed', [{ path: 'publish', message: 'must be true or false' }]);
 
     const wasVisible = isVisible(stream, existing);
-    let publishedAt = existing.publishedAt ?? existing.createdAt;
+    let status = {
+      publishedAt: existing.publishedAt ?? existing.createdAt,
+      publishAt: existing.publishAt ?? null,
+      unpublishAt: existing.unpublishAt ?? null,
+      scheduleError: existing.scheduleError ?? null,
+    };
     if (stream.draftAndPublish) {
-      publishedAt = existing.publishedAt ?? null;
-      if (body.publish === true) publishedAt ??= new Date().toISOString();
-      if (body.publish === false) publishedAt = null;
+      status.publishedAt = existing.publishedAt ?? null;
+      if (body.publish === true) {
+        status.publishedAt ??= nowIso();
+        status.publishAt = null;
+        status.scheduleError = null;
+      }
+      if (body.publish === false) {
+        status.publishedAt = null;
+        status.unpublishAt = null;
+      }
     }
+    status = applySchedule(stream, body, status);
 
-    let incoming = existing.data;
+    let incoming;
     if ('data' in body) {
       if (merge && (!body.data || typeof body.data !== 'object' || Array.isArray(body.data))) {
         fail(400, 'Validation failed', [{ path: 'data', message: 'must be a JSON object' }]);
@@ -619,16 +973,22 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     } else {
       incoming = currentKeys(stream, existing.data);
     }
-    const data = prepareData(stream, incoming, { id, index: uniqueIndex(stream), enforceRequired: publishedAt != null });
+    const enforceRequired = status.publishedAt != null || status.publishAt != null;
+    const data = prepareData(stream, incoming, { id, index: uniqueIndex(stream), enforceRequired });
 
     const updated = {
       ...existing,
       data,
-      publishedAt,
+      ...status,
       timestamp: body.timestamp !== undefined ? parseTimestamp(body.timestamp, 'timestamp') : existing.timestamp,
-      updatedAt: new Date().toISOString(),
+      updatedAt: nowIso(),
     };
-    await log.put([updated]);
+    if (!stream.draftAndPublish) {
+      delete updated.publishAt;
+      delete updated.unpublishAt;
+      delete updated.scheduleError;
+    } else if (!updated.scheduleError) delete updated.scheduleError;
+    await putItems(stream, [updated]);
     const nowVisible = isVisible(stream, updated);
     const type = stream.draftAndPublish && wasVisible !== nowVisible ? (nowVisible ? 'published' : 'unpublished') : 'updated';
     notify(stream, type, updated, { wasVisible });
@@ -636,32 +996,32 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   }
 
   async function setPublished(req, res, stream, id, publish) {
-    authorize(req);
+    requireScope(req, stream, 'update');
     if (!stream.draftAndPublish) fail(400, 'Draft & publish is not enabled for this stream');
-    const log = logs.get(stream.id);
-    const existing = log.get(id);
+    const existing = logs.get(stream.id).get(id);
     if (!existing) fail(404, 'Item not found');
     const wasVisible = existing.publishedAt != null;
     if (wasVisible === publish) return send(res, 200, existing); // already in that state
 
     if (publish) {
-      const check = validateData(stream.fields, currentKeys(stream, existing.data), { mediaExists, enforceRequired: true });
+      const check = validateData(stream.fields, currentKeys(stream, existing.data), { mediaExists, relationExists, enforceRequired: true });
       if (check.errors) fail(400, 'Cannot publish: validation failed', check.errors);
     }
-    const now = new Date().toISOString();
-    const updated = { ...existing, publishedAt: publish ? now : null, updatedAt: now };
-    await log.put([updated]);
+    const now = nowIso();
+    const { scheduleError, ...rest } = existing;
+    const updated = publish
+      ? { ...rest, publishedAt: now, publishAt: null, updatedAt: now }
+      : { ...rest, publishedAt: null, unpublishAt: null, updatedAt: now };
+    await putItems(stream, [updated]);
     notify(stream, publish ? 'published' : 'unpublished', updated, { wasVisible });
     send(res, 200, updated);
   }
 
   async function deleteItem(req, res, stream, id) {
-    authorize(req);
-    const log = logs.get(stream.id);
-    const existing = log.get(id);
+    requireScope(req, stream, 'delete');
+    const existing = logs.get(stream.id).get(id);
     if (!existing) fail(404, 'Item not found');
-    await log.remove([id]);
-    notify(stream, 'deleted', existing, { wasVisible: isVisible(stream, existing) });
+    await removeItems(stream, [existing]);
     send(res, 200, existing);
   }
 
@@ -690,7 +1050,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     const stream = getStreamOr404(parts[0]);
 
     if (parts.length === 1) {
-      if (m === 'GET') return finish(send(res, 200, summary(stream, isAuthorized(req))));
+      if (m === 'GET') return finish(send(res, 200, summaryFor(req, stream)));
       if (m === 'POST') return finish(createItems(req, res, stream)); // shortcut: POST /api/streams/:slug
       if (m === 'PUT' || m === 'PATCH') return finish(updateStream(req, res, stream));
       if (m === 'DELETE') return finish(deleteStream(req, res, stream));
@@ -702,6 +1062,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
     if (parts.length === 4 && parts[1] === 'webhooks' && parts[3] === 'test' && m === 'POST') {
       return finish(testWebhook(req, res, stream, parts[2]));
     }
+    if (parts[1] === 'keys' && parts.length <= 3) return finish(keysRoute(req, res, stream, parts, m));
 
     if (parts[1] === 'items' || parts[1] === 'events') {
       if (parts.length === 2) {
@@ -711,7 +1072,7 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
       }
       const id = parts[2];
       if (parts.length === 3) {
-        if (m === 'GET') return finish(send(res, 200, getItemOr404(stream, id, req)));
+        if (m === 'GET') return finish(getItem(req, res, stream, id, url));
         if (m === 'PUT') return finish(updateItem(req, res, stream, id, false));
         if (m === 'PATCH') return finish(updateItem(req, res, stream, id, true));
         if (m === 'DELETE') return finish(deleteItem(req, res, stream, id));
@@ -728,11 +1089,13 @@ export async function createStreamsApi({ store, dataDir, authorize, isAuthorized
   function close() {
     clearInterval(heartbeat);
     clearInterval(sweeper);
+    clearInterval(scheduler);
+    clearTimeout(touchTimer);
     heartbeat = null;
     webhooks.close();
     for (const subs of subscribers.values()) for (const s of subs) s.res.end();
     subscribers.clear();
   }
 
-  return { route, close };
+  return { route, close, runScheduler };
 }

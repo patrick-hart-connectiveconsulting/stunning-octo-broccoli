@@ -2,7 +2,7 @@
 
 export const FIELD_TYPES = [
   'string', 'text', 'richtext', 'uid', 'email', 'url',
-  'integer', 'number', 'boolean', 'datetime', 'enum', 'tags', 'json', 'media',
+  'integer', 'number', 'boolean', 'datetime', 'enum', 'tags', 'json', 'media', 'relation',
 ];
 
 export const UID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -11,6 +11,8 @@ const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_FIELDS = 100;
 const MAX_TAGS = 100;
 const MAX_TAG_LENGTH = 64;
+const MAX_RELATIONS = 100;
+const STREAM_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
 const DEFAULT_MAX_LENGTH = { string: 255, text: 100000, richtext: 1000000, uid: 255 };
 const UNIQUE_CAPABLE = new Set(['string', 'email', 'url', 'integer', 'number', 'uid']);
@@ -73,6 +75,12 @@ export function normalizeFields(input) {
       if (raw.targetField !== undefined && raw.targetField !== null && raw.targetField !== '') field.targetField = String(raw.targetField);
     }
 
+    if (raw.type === 'relation') {
+      if (typeof raw.target !== 'string' || !STREAM_SLUG.test(raw.target)) err('relation fields need a target stream slug');
+      field.target = raw.target;
+      field.multiple = raw.multiple === true;
+    }
+
     if (raw.unique === true) {
       if (UNIQUE_CAPABLE.has(raw.type)) field.unique = true;
       else if (raw.type !== undefined) err(`unique is not supported on ${raw.type} fields`);
@@ -92,6 +100,9 @@ export function normalizeFields(input) {
   return errors.length ? { errors } : { fields };
 }
 
+/** Empty value stored for a field: [] for list-like fields, null otherwise. */
+export const emptyValue = (f) => (f.type === 'tags' || (f.type === 'relation' && f.multiple) ? [] : null);
+
 export const isEmptyValue = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
 
 /**
@@ -100,7 +111,7 @@ export const isEmptyValue = (v) => v === undefined || v === null || v === '' || 
  * (drafts) required fields may be empty.
  * Returns { data } or { errors: [{ path, message }] }.
  */
-export function validateData(fields, data, { mediaExists = () => true, enforceRequired = true } = {}) {
+export function validateData(fields, data, { mediaExists = () => true, relationExists = () => true, enforceRequired = true } = {}) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { errors: [{ path: 'data', message: 'data must be a JSON object' }] };
   }
@@ -118,17 +129,17 @@ export function validateData(fields, data, { mediaExists = () => true, enforceRe
     const value = data[field.name];
     if (isEmptyValue(value)) {
       if (field.required && enforceRequired) errors.push({ path, message: 'is required' });
-      out[field.name] = field.type === 'tags' ? [] : null;
+      out[field.name] = emptyValue(field);
       continue;
     }
-    const result = coerce(field, value, mediaExists);
+    const result = coerce(field, value, mediaExists, relationExists);
     if (result.error) errors.push({ path, message: result.error });
     else out[field.name] = result.value;
   }
   return errors.length ? { errors } : { data: out };
 }
 
-function coerce(field, value, mediaExists) {
+function coerce(field, value, mediaExists, relationExists) {
   const lengthCheck = (v) => (v.length > field.maxLength ? { error: `must be at most ${field.maxLength} characters` } : { value: v });
   switch (field.type) {
     case 'string':
@@ -181,6 +192,17 @@ function coerce(field, value, mediaExists) {
     case 'media':
       if (typeof value !== 'string') return { error: 'must be a media file id' };
       return mediaExists(value) ? { value } : { error: 'media file does not exist' };
+    case 'relation': {
+      if (!field.multiple) {
+        if (typeof value !== 'string') return { error: `must be the id of a ${field.target} item` };
+        return relationExists(field, value) ? { value } : { error: `no ${field.target} item with id ${value}` };
+      }
+      if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) return { error: `must be an array of ${field.target} item ids` };
+      const ids = [...new Set(value)];
+      if (ids.length > MAX_RELATIONS) return { error: `at most ${MAX_RELATIONS} related items` };
+      const missing = ids.filter((id) => !relationExists(field, id));
+      return missing.length ? { error: `no ${field.target} item with id ${missing.join(', ')}` } : { value: ids };
+    }
     default:
       return { error: 'has an unknown type' };
   }
@@ -215,6 +237,9 @@ export function fieldJsonSchema(f) {
     tags: { type: 'array', items: { type: 'string', maxLength: MAX_TAG_LENGTH }, uniqueItems: true, maxItems: MAX_TAGS },
     json: {},
     media: { type: 'string', format: 'uuid', description: 'Media file id' },
+    relation: f.multiple
+      ? { type: 'array', items: { type: 'string', format: 'uuid' }, uniqueItems: true, maxItems: MAX_RELATIONS, description: `Ids of items in the "${f.target}" stream` }
+      : { type: 'string', format: 'uuid', description: `Id of an item in the "${f.target}" stream` },
   }[f.type];
   const schema = { ...base };
   if (f.maxLength && f.type !== 'enum') schema.maxLength = f.maxLength;

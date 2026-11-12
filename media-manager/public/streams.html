@@ -84,6 +84,7 @@
                 <option value="all">All</option>
                 <option value="published">Published</option>
                 <option value="draft">Drafts</option>
+                <option value="scheduled">Scheduled</option>
               </select>
               <form class="filter" id="filterForm">
                 <select id="filterField" aria-label="Filter field"></select>
@@ -172,6 +173,23 @@
                 <button class="btn btn-primary" type="submit">Save settings</button>
               </div>
             </form>
+
+            <section class="keys" aria-labelledby="keysTitle">
+              <h3 class="section-title" id="keysTitle">API keys</h3>
+              <p class="hint small" style="margin-top:-6px">Keys that only work for this stream. Give a device a key that can only create items, or a preview site one that can read drafts. Keys can't change settings; the main token can always do everything.</p>
+              <div id="keyList" class="key-list"></div>
+              <div class="key-reveal" id="keyReveal" hidden>
+                <strong>Copy this key now. It won't be shown again.</strong>
+                <div class="input-with-btn"><code id="keyValue"></code><button type="button" class="btn btn-secondary btn-sm" id="copyKey">Copy</button></div>
+              </div>
+              <form class="key-create" id="keyForm">
+                <input name="name" placeholder="Key name, e.g. Warehouse scanner" maxlength="100" required aria-label="Key name">
+                <div class="chips" id="keyScopes"></div>
+                <label class="small muted key-expiry">Expires<input type="date" name="expires" aria-label="Expiry date (optional)"></label>
+                <button class="btn btn-secondary btn-sm" type="submit">Create key</button>
+              </form>
+            </section>
+
             <div class="danger-zone">
               <div>
                 <strong>Delete this stream</strong>
@@ -235,8 +253,13 @@
       </header>
       <div class="modal-body fields">
         <dl class="meta" id="eventMeta" hidden></dl>
+        <p class="alert" id="scheduleError" hidden></p>
         <label>Timestamp<input type="datetime-local" step="1" name="timestamp"><span class="hint" id="timestampHint">When it happened. Leave blank to use the current time.</span></label>
         <div id="eventFields" class="fields"></div>
+        <div class="row-2 schedule-box" id="scheduleFields" hidden>
+          <label>Publish at<input type="datetime-local" step="1" name="publishAt"><span class="hint">Publishes automatically at this time. Leave blank to publish by hand.</span></label>
+          <label>Unpublish at<input type="datetime-local" step="1" name="unpublishAt"><span class="hint">Optional: takes it down automatically.</span></label>
+        </div>
       </div>
       <footer class="modal-footer">
         <button class="btn btn-danger" type="button" id="deleteEvent" hidden>Delete</button>

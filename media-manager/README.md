@@ -3,7 +3,7 @@
 A lightweight, self-hosted alternative to Strapi. It needs only Node.js 20+ and has no `npm install` step or build step. It has two modules:
 
 - **Media Library**: upload, organize and serve files.
-- **Streams**: data streams of anything (events, blog posts, social posts, products…). Pick a template or design the dataset yourself, then post, fetch, filter and subscribe to items over a REST API. Streams also support draft & publish, unique slugs, retention limits and signed webhooks.
+- **Streams**: data streams of anything (events, blog posts, social posts, products…). Pick a template or design the dataset yourself, then post, fetch, filter and subscribe to items over a REST API. Streams also support relations between streams, draft & publish with scheduling, per-stream API keys, unique slugs, retention limits and signed webhooks.
 
 **Full specification: [SPEC.md](SPEC.md)**
 
@@ -24,6 +24,23 @@ curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: appli
 curl -g "http://localhost:1338/api/streams/blog/items?filter[tags]=news&sort=timestamp:desc"
 curl -g "http://localhost:1338/api/streams/blog/items?filter[slug]=hello-world"
 curl -N  "http://localhost:1338/api/streams/blog/subscribe"
+```
+
+Relations, scheduling and stream keys:
+
+```bash
+# a post that points at an author in another stream; fetch it with the author filled in
+curl -g "http://localhost:1338/api/streams/blog/items?filter[slug]=hello-world&populate=*"
+
+# schedule a draft to go live (and come down) automatically
+curl -X PATCH -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"publishAt":"2026-12-01T09:00:00Z","unpublishAt":"2026-12-31T23:59:59Z"}' \
+  http://localhost:1338/api/streams/blog/items/<id>
+
+# give a device a key that can only add items to one stream (the key is shown once)
+curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Warehouse scanner","scopes":["create"]}' \
+  http://localhost:1338/api/streams/orders/keys
 ```
 
 The admin page for streams is at `/streams.html`. It has a template picker, a field builder, a live items table with publishing, settings for retention and webhooks, and per-stream API docs with copy-paste examples.

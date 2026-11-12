@@ -108,7 +108,14 @@ export async function createApp(options = {}) {
 
   const deleteBinary = (file) => unlink(join(uploadDir, file.hash + file.ext)).catch(() => {});
 
-  const streams = await createStreamsApi({ store, dataDir: config.dataDir, authorize, isAuthorized, webhookOptions: options.webhookOptions });
+  const streams = await createStreamsApi({
+    store,
+    dataDir: config.dataDir,
+    isMaster: isAuthorized,
+    bearer,
+    webhookOptions: options.webhookOptions,
+    schedulerIntervalMs: options.schedulerIntervalMs,
+  });
 
   // ---- route handlers ------------------------------------------------------
 
@@ -410,7 +417,7 @@ export async function createApp(options = {}) {
     server.closeAllConnections?.();
   };
 
-  return { server, store, config, close };
+  return { server, store, config, close, streams };
 }
 
 function formatBytes(n) {

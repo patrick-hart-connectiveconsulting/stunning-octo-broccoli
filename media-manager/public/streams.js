@@ -18,6 +18,13 @@ const FIELD_TYPES = [
   ['tags', 'Tags'],
   ['json', 'JSON'],
   ['media', 'Media'],
+  ['relation', 'Relation'],
+];
+const KEY_SCOPES = [
+  ['read', 'Read (incl. drafts)'],
+  ['create', 'Create'],
+  ['update', 'Update & publish'],
+  ['delete', 'Delete'],
 ];
 const UNIQUE_CAPABLE = new Set(['string', 'email', 'url', 'integer', 'number']);
 const DEFAULT_MAX = { string: 255, text: 100000, richtext: 1000000, uid: 255 };
@@ -40,6 +47,7 @@ const state = {
   source: null, // EventSource
   editing: null,
   media: null,
+  related: new Map(), // target slug -> items (for relation pickers)
 };
 
 // ---- helpers ---------------------------------------------------------------
@@ -65,13 +73,32 @@ function setUrl() {
   history.replaceState(null, '', url);
 }
 
-function preview(value, type) {
+/** A human-readable name for an item: its title/name-like field, else the first text field, else #seq. */
+function itemLabel(stream, item) {
+  if (!item) return '—';
+  const fields = stream?.fields || [];
+  const preferred = ['title', 'name', 'label', 'heading', 'subject'];
+  const field = fields.find((f) => preferred.includes(f.name.toLowerCase()) && typeof item.data?.[f.name] === 'string')
+    || fields.find((f) => ['string', 'uid', 'email'].includes(f.type) && typeof item.data?.[f.name] === 'string' && item.data[f.name]);
+  return field ? truncate(item.data[field.name], 60) : `#${item.seq}`;
+}
+const streamBySlug = (slug) => state.streams.find((s) => s.slug === slug);
+const itemStatus = (item) => (item.publishedAt ? 'published' : item.publishAt ? 'scheduled' : 'draft');
+
+function preview(value, type, field) {
   if (value === null || value === undefined || (Array.isArray(value) && !value.length)) return h('span', { class: 'muted' }, '—');
   if (type === 'boolean' || typeof value === 'boolean') return h('span', { class: `pill ${value ? 'on' : ''}` }, value ? 'true' : 'false');
   if (type === 'datetime') return formatDate(value);
   if (type === 'enum') return h('span', { class: 'pill' }, value);
   if (type === 'tags') return h('span', { class: 'tag-list' }, value.slice(0, 4).map((t) => h('span', { class: 'pill' }, t)), value.length > 4 ? ` +${value.length - 4}` : null);
   if (type === 'media') return h('code', { class: 'small' }, `${value.slice(0, 8)}…`);
+  if (type === 'relation') {
+    const target = streamBySlug(field?.target);
+    const list = (Array.isArray(value) ? value : [value]).filter(Boolean);
+    if (!list.length) return h('span', { class: 'muted' }, '—');
+    return h('span', { class: 'tag-list' }, list.slice(0, 3).map((v) => h('span', { class: 'pill rel' }, typeof v === 'object' ? itemLabel(target, v) : `${v.slice(0, 8)}…`)),
+      list.length > 3 ? ` +${list.length - 3}` : null);
+  }
   if (type === 'uid') return h('code', { class: 'small' }, truncate(value, 40));
   if (type === 'richtext') return truncate(value.replace(/[#*_`>\[\]()!-]+/g, ' ').replace(/\s+/g, ' ').trim(), 80);
   if (typeof value === 'object') return h('code', { class: 'small' }, truncate(JSON.stringify(value), 80));
@@ -81,7 +108,7 @@ function preview(value, type) {
 // ---- field builder ---------------------------------------------------------
 
 /** Editable list of field definitions. Returns { el, getFields(), setFields() }. */
-function fieldBuilder(initial = []) {
+function fieldBuilder(initial = [], builderSelf = null) {
   const list = h('div', { class: 'field-rows' });
   const empty = h('p', { class: 'muted small field-empty' }, 'No fields — this stream accepts any JSON object.');
   const sync = () => { empty.hidden = list.children.length > 0; };
@@ -103,6 +130,15 @@ function fieldBuilder(initial = []) {
         extras.append(
           h('input', { 'data-k': 'min', type: 'number', step: 'any', placeholder: 'Min', value: sameType ? field.min ?? '' : '', 'aria-label': 'Minimum' }),
           h('input', { 'data-k': 'max', type: 'number', step: 'any', placeholder: 'Max', value: sameType ? field.max ?? '' : '', 'aria-label': 'Maximum' }));
+      } else if (t === 'relation') {
+        const targets = state.streams.filter((x) => !builderSelf || x.slug !== builderSelf);
+        extras.append(
+          h('select', { 'data-k': 'target', 'aria-label': 'Related stream' },
+            h('option', { value: '' }, 'Related stream…'),
+            builderSelf ? h('option', { value: builderSelf, selected: field.target === builderSelf }, 'This stream') : null,
+            targets.map((x) => h('option', { value: x.slug, selected: x.slug === field.target }, x.name))),
+          h('label', { class: 'req', title: 'Allow several related items' },
+            h('input', { type: 'checkbox', 'data-k': 'multiple', checked: Boolean(field.multiple) }), 'Many'));
       } else if (t === 'uid') {
         extras.append(h('input', { 'data-k': 'targetField', placeholder: 'Generate from field (e.g. title)', value: field.targetField || '', 'aria-label': 'Generate from field' }));
       } else if (t in DEFAULT_MAX) {
@@ -137,7 +173,7 @@ function fieldBuilder(initial = []) {
         if (input.type === 'checkbox') { if (input.checked) f[k] = true; continue; }
         if (input.value === '') continue;
         if (k === 'options') f[k] = input.value.split(',').map((o) => o.trim()).filter(Boolean);
-        else if (k === 'targetField') f[k] = input.value.trim();
+        else if (k === 'targetField' || k === 'target') f[k] = input.value.trim();
         else f[k] = Number(input.value);
       }
       return f;
@@ -252,6 +288,7 @@ async function loadItems() {
   const s = state.current;
   if (!s) return;
   const params = new URLSearchParams({ page: state.page, pageSize: state.pageSize, sort: state.sort });
+  if (s.fields.some((f) => f.type === 'relation')) params.set('populate', '*');
   if (s.draftAndPublish) params.set('status', state.status);
   if (state.filter) {
     const { field, op, value } = state.filter;
@@ -274,14 +311,18 @@ async function loadItems() {
 
 function columns() {
   const s = state.current;
-  if (s.fields.length) return s.fields.slice(0, MAX_COLUMNS).map((f) => ({ key: f.name, label: f.name, type: f.type }));
+  if (s.fields.length) return s.fields.slice(0, MAX_COLUMNS).map((f) => ({ key: f.name, label: f.name, type: f.type, field: f }));
   return [{ key: null, label: 'data', type: 'json' }];
 }
 
 function statusPill(item) {
-  return item.publishedAt
-    ? h('span', { class: 'status-pill published' }, 'Published')
-    : h('span', { class: 'status-pill draft' }, 'Draft');
+  const status = itemStatus(item);
+  if (status === 'published') {
+    return h('span', { class: 'status-pill published', title: item.unpublishAt ? `Unpublishes ${formatDate(item.unpublishAt)}` : '' },
+      'Published', item.unpublishAt ? ' ⏲' : '');
+  }
+  if (status === 'scheduled') return h('span', { class: 'status-pill scheduled', title: `Publishes ${formatDate(item.publishAt)}` }, `Scheduled · ${formatDate(item.publishAt)}`);
+  return h('span', { class: `status-pill draft${item.scheduleError ? ' warn' : ''}`, title: item.scheduleError || '' }, item.scheduleError ? 'Draft ⚠' : 'Draft');
 }
 
 function renderItems() {
@@ -300,7 +341,7 @@ function renderItems() {
     sortable('#', 'seq'),
     sortable('Timestamp', 'timestamp'),
     s.draftAndPublish ? h('th', {}, 'Status') : null,
-    cols.map((c) => (c.key && !['json', 'tags'].includes(c.type) ? sortable(c.label, `data.${c.key}`) : h('th', {}, c.label))),
+    cols.map((c) => (c.key && !['json', 'tags', 'relation'].includes(c.type) ? sortable(c.label, `data.${c.key}`) : h('th', {}, c.label))),
     s.fields.length > MAX_COLUMNS ? h('th', { class: 'muted' }, `+${s.fields.length - MAX_COLUMNS} more`) : null));
 
   $('#eventsBody').replaceChildren(...state.items.map((item) => h('tr', {
@@ -311,7 +352,7 @@ function renderItems() {
   h('td', { class: 'muted' }, item.seq),
   h('td', { class: 'nowrap' }, formatDate(item.timestamp)),
   s.draftAndPublish ? h('td', {}, statusPill(item)) : null,
-  cols.map((c) => h('td', {}, preview(c.key ? item.data?.[c.key] : item.data, c.type))),
+  cols.map((c) => h('td', {}, preview(c.key ? item.data?.[c.key] : item.data, c.type, c.field))),
   s.fields.length > MAX_COLUMNS ? h('td', {}) : null)));
 
   const empty = state.items.length === 0;
@@ -376,6 +417,19 @@ async function mediaOptions() {
   return state.media;
 }
 
+async function relatedItems(slug) {
+  if (!state.related.has(slug)) {
+    try {
+      const target = streamBySlug(slug);
+      const status = target?.draftAndPublish ? '&status=all' : '';
+      state.related.set(slug, (await api(`/api/streams/${encodeURIComponent(slug)}/items?pageSize=500&sort=timestamp:desc${status}`)).data);
+    } catch {
+      state.related.set(slug, []);
+    }
+  }
+  return state.related.get(slug);
+}
+
 async function itemInput(field, value, form) {
   const common = { name: `f:${field.name}`, 'data-type': field.type, required: field.required };
   switch (field.type) {
@@ -413,6 +467,27 @@ async function itemInput(field, value, form) {
           onclick: () => { input.value = slugify(form.elements[`f:${field.targetField}`]?.value || ''); },
         }, 'Generate'));
     }
+    case 'relation': {
+      const target = streamBySlug(field.target);
+      const items = await relatedItems(field.target);
+      const label = (it) => `${itemLabel(target, it)}${target?.draftAndPublish && !it.publishedAt ? ' (draft)' : ''}`;
+      const ids = (Array.isArray(value) ? value : value ? [value] : []).map((v) => (typeof v === 'object' ? v.id : v));
+      if (!field.multiple) {
+        const sel = h('select', common, h('option', { value: '' }, '—'),
+          items.map((it) => h('option', { value: it.id, selected: ids.includes(it.id) }, label(it))));
+        return sel;
+      }
+      const search = h('input', { type: 'search', class: 'rel-search', placeholder: `Search ${target?.labels.plural || 'items'}…`, 'aria-label': 'Search related items' });
+      const options = items.map((it) => h('label', { class: 'rel-option', 'data-label': label(it).toLowerCase() },
+        h('input', { type: 'checkbox', name: common.name, value: it.id, checked: ids.includes(it.id) }), label(it)));
+      search.addEventListener('input', () => {
+        const q = search.value.toLowerCase();
+        for (const o of options) o.hidden = q && !o.dataset.label.includes(q) && !o.querySelector('input').checked;
+      });
+      return h('div', { class: 'rel-picker', 'data-relation': field.name },
+        items.length > 8 ? search : null,
+        h('div', { class: 'rel-options' }, options.length ? options : h('span', { class: 'muted small' }, `No ${target?.labels.plural || 'items'} yet`)));
+    }
     case 'media': {
       const files = await mediaOptions();
       const sel = h('select', common, h('option', { value: '' }, '—'),
@@ -434,15 +509,26 @@ async function openItem(item = null) {
   $('#deleteEvent').hidden = !item;
   $('#saveEvent').textContent = dp ? (item?.publishedAt ? 'Save' : 'Save draft') : (item ? 'Save changes' : `Create ${s.labels.singular}`);
   $('#saveEvent').className = `btn ${dp ? 'btn-secondary' : 'btn-primary'}`;
+  state.related.clear(); // pick up related items created since last time
   $('#publishEvent').hidden = !dp || Boolean(item?.publishedAt);
   $('#publishEvent').textContent = item ? 'Save & publish' : 'Publish';
   $('#unpublishEvent').hidden = !dp || !item?.publishedAt;
   const status = $('#itemStatus');
   status.hidden = !dp || !item;
   if (dp && item) {
-    status.className = `status-pill ${item.publishedAt ? 'published' : 'draft'}`;
-    status.textContent = item.publishedAt ? 'Published' : 'Draft';
+    const st = itemStatus(item);
+    status.className = `status-pill ${st}`;
+    status.textContent = capitalize(st);
   }
+  $('#scheduleFields').hidden = !dp;
+  form.publishAt.value = toLocalInput(item?.publishAt);
+  form.unpublishAt.value = toLocalInput(item?.unpublishAt);
+  form.publishAt.dataset.initial = form.publishAt.value;
+  form.unpublishAt.dataset.initial = form.unpublishAt.value;
+  form.publishAt.disabled = Boolean(item?.publishedAt); // already live: only unpublishAt applies
+  $('#scheduleError').hidden = !item?.scheduleError;
+  $('#scheduleError').textContent = item?.scheduleError || '';
+  updateSaveLabel();
 
   form.timestamp.value = item ? toLocalInput(item.timestamp) : '';
   form.timestamp.dataset.initial = form.timestamp.value; // input is second-precision; only send if edited
@@ -488,6 +574,10 @@ function readItemForm() {
   }
   const data = {};
   for (const f of s.fields) {
+    if (f.type === 'relation' && f.multiple) {
+      data[f.name] = [...form.querySelectorAll(`input[type=checkbox][name="f:${f.name}"]:checked`)].map((i) => i.value);
+      continue;
+    }
     const el = form.elements[`f:${f.name}`];
     const v = el.value.trim();
     if (f.type === 'tags') { data[f.name] = v.split(',').map((t) => t.trim()).filter(Boolean); continue; }
@@ -497,7 +587,7 @@ function readItemForm() {
     else if (f.type === 'datetime') data[f.name] = fromLocalInput(v);
     else if (f.type === 'json') {
       try { data[f.name] = JSON.parse(v); } catch { throw new Error(`${f.name} must be valid JSON`); }
-    } else if (['string', 'uid', 'email', 'url'].includes(f.type)) data[f.name] = v;
+    } else if (['string', 'uid', 'email', 'url', 'relation'].includes(f.type)) data[f.name] = v;
     else data[f.name] = el.value; // keep inner whitespace for text / richtext
   }
   return data;
@@ -516,13 +606,24 @@ async function saveItem(mode) {
   if (tsInput.value && tsInput.value !== tsInput.dataset.initial) body.timestamp = fromLocalInput(tsInput.value);
   if (s.draftAndPublish && mode !== 'save') body.publish = mode === 'publish';
   if (s.draftAndPublish && mode === 'save' && !state.editing) body.publish = false;
+  if (s.draftAndPublish) {
+    const form = $('#eventForm');
+    for (const key of ['publishAt', 'unpublishAt']) {
+      const input = form[key];
+      if (input.disabled || input.value === input.dataset.initial) continue;
+      body[key] = input.value ? fromLocalInput(input.value) : null;
+    }
+    // "Publish now" overrides a pending schedule rather than conflicting with it.
+    if (mode === 'publish') delete body.publishAt;
+  }
 
   const label = s.labels.singular;
   try {
     if (state.editing) await api(`${streamPath(s)}/items/${state.editing.id}`, { method: 'PUT', json: body });
     else await api(`${streamPath(s)}/items`, { method: 'POST', json: body });
     $('#eventDialog').close();
-    const verb = mode === 'publish' ? 'published' : mode === 'unpublish' ? 'unpublished' : state.editing ? 'saved' : s.draftAndPublish ? 'saved as draft' : 'created';
+    const scheduled = body.publishAt && mode === 'save';
+    const verb = mode === 'publish' ? 'published' : mode === 'unpublish' ? 'unpublished' : scheduled ? `scheduled for ${formatDate(body.publishAt)}` : state.editing ? 'saved' : s.draftAndPublish ? 'saved as draft' : 'created';
     toast(`${capitalize(label)} ${verb}`);
     await loadStreams();
     loadItems();
@@ -546,6 +647,16 @@ async function deleteItem() {
   }
 }
 
+/** "Save draft" becomes "Schedule" when a publish time is filled in. */
+function updateSaveLabel() {
+  const s = state.current;
+  const form = $('#eventForm');
+  if (!s?.draftAndPublish) return;
+  const item = state.editing;
+  if (item?.publishedAt) $('#saveEvent').textContent = 'Save';
+  else $('#saveEvent').textContent = form.publishAt.value ? 'Schedule' : 'Save draft';
+}
+
 // ---- dataset tab -----------------------------------------------------------
 
 let datasetBuilder = null;
@@ -556,7 +667,7 @@ function renderDataset() {
   form.name.value = s.name;
   form.slug.value = s.slug;
   form.description.value = s.description || '';
-  datasetBuilder = fieldBuilder(s.fields);
+  datasetBuilder = fieldBuilder(s.fields, s.slug);
   $('#datasetFields').replaceChildren(datasetBuilder.el);
 }
 
@@ -632,7 +743,60 @@ function webhookRow(hook = { url: '', events: [...WEBHOOK_EVENTS], enabled: true
   return row;
 }
 
+function renderKeys() {
+  const s = state.current;
+  const keys = s.apiKeys || [];
+  $('#keyList').replaceChildren(...(keys.length ? keys.map((k) => {
+    const expired = k.expiresAt && k.expiresAt <= new Date().toISOString();
+    return h('div', { class: `key-row${expired ? ' expired' : ''}` },
+      h('div', { class: 'key-main' },
+        h('strong', {}, k.name),
+        h('code', { class: 'small' }, `${k.prefix}…`),
+        h('span', { class: 'tag-list' }, k.scopes.map((sc) => h('span', { class: 'pill' }, sc)))),
+      h('span', { class: 'small muted' },
+        `Created ${formatDate(k.createdAt)} · ${k.lastUsedAt ? `last used ${formatDate(k.lastUsedAt)}` : 'never used'}`,
+        k.expiresAt ? ` · ${expired ? 'expired' : 'expires'} ${formatDate(k.expiresAt)}` : ''),
+      h('button', {
+        type: 'button', class: 'btn btn-danger btn-sm',
+        onclick: async () => {
+          if (!confirm(`Revoke the key “${k.name}”? Anything using it stops working immediately.`)) return;
+          try {
+            await api(`${streamPath()}/keys/${k.id}`, { method: 'DELETE' });
+            toast('Key revoked');
+            await loadStreams();
+            renderKeys();
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        },
+      }, 'Revoke'));
+  }) : [h('p', { class: 'muted small' }, 'No keys yet.')]));
+}
+
+async function createKey(e) {
+  e.preventDefault();
+  const form = $('#keyForm');
+  const scopes = [...form.querySelectorAll('input[type=checkbox]:checked')].map((i) => i.value);
+  if (!scopes.length) return toast('Choose at least one permission', 'error');
+  const json = { name: form.name.value, scopes };
+  if (form.expires.value) json.expiresAt = new Date(`${form.expires.value}T23:59:59`).toISOString();
+  try {
+    const created = await api(`${streamPath()}/keys`, { method: 'POST', json });
+    $('#keyValue').textContent = created.key;
+    $('#keyReveal').hidden = false;
+    form.reset();
+    toast('Key created');
+    await loadStreams();
+    renderKeys();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function renderSettings() {
+  renderKeys();
+  $('#keyReveal').hidden = true;
+  $('#keyValue').textContent = '';
   const s = state.current;
   const form = $('#settingsForm');
   form.singular.value = s.labels.singular;
@@ -728,6 +892,9 @@ function renderApiDocs() {
     ] : []),
     ['GET', `${path}/subscribe`, 'Live feed (Server-Sent Events)'],
     ['GET', `${path}/schema`, `JSON Schema of a ${L.singular}’s data`],
+    ['GET', `${path}/keys`, 'List API keys (main token only)'],
+    ['POST', `${path}/keys`, 'Create an API key — the secret is returned once'],
+    ['DELETE', `${path}/keys/:id`, 'Revoke an API key'],
     ['GET', path, 'Stream definition'],
     ['PATCH', path, 'Update name, fields or settings'],
     ['DELETE', path, `Delete the stream and all its ${L.plural}`],
@@ -740,7 +907,14 @@ function renderApiDocs() {
     [`Fetch the latest ${L.plural}`, `curl "${origin}${path}/items?sort=timestamp:desc&pageSize=50"`],
     ['Filter', `curl -g "${origin}${path}/items?filter[${firstField?.name || 'level'}]=${encodeURIComponent(filterValue)}&since=2026-01-01T00:00:00Z"`],
     ...(uidField ? [[`Get a ${L.singular} by its ${uidField.name}`, `curl -g "${origin}${path}/items?filter[${uidField.name}]=my-item"`]] : []),
+    ...(s.fields.some((f) => f.type === 'relation')
+      ? [['Include related items', `curl "${origin}${path}/items?populate=*"\n# or only some: ?populate=${s.fields.filter((f) => f.type === 'relation').map((f) => f.name).join(',')}`]]
+      : []),
+    ...(dp
+      ? [[`Schedule a ${L.singular}`, `curl -X PATCH ${auth}-H "Content-Type: application/json" \\\n  -d '{"publishAt":"${new Date(Date.now() + 86400000).toISOString().slice(0, 13)}:00:00Z","unpublishAt":null}' \\\n  ${origin}${path}/items/<id>`]]
+      : []),
     [`Poll for new ${L.plural} after sequence 42`, `curl "${origin}${path}/items?after=42"`],
+    ['Use a stream API key instead of the main token', `# Create one in Settings → API keys, then:\ncurl -X POST -H "Authorization: Bearer mmk_…" -H "Content-Type: application/json" \\\n  -d '{"data":{…}}' ${origin}${path}/items`],
     ['Subscribe live', `curl -N "${origin}${path}/subscribe"\n\n// or in the browser\nconst es = new EventSource('${path}/subscribe');\nes.addEventListener('created', (e) => console.log(JSON.parse(e.data)));`],
     ['Verify a webhook signature (Node.js)', `import { createHmac, timingSafeEqual } from 'node:crypto';\n\nfunction verify(rawBody, header, secret) {\n  const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');\n  return header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected));\n}\n// header = req.headers['x-webhook-signature']`],
   ];
@@ -862,6 +1036,11 @@ $('#addWebhook').addEventListener('click', () => {
   row.querySelector('input').focus();
 });
 $('#deleteStream').addEventListener('click', deleteStream);
+$('#keyForm').addEventListener('submit', createKey);
+$('#copyKey').addEventListener('click', () => copyText($('#keyValue').textContent));
+$('#keyScopes').replaceChildren(...KEY_SCOPES.map(([v, label]) => h('label', { class: 'chip' },
+  h('input', { type: 'checkbox', value: v, checked: v === 'create' }), label)));
+$('#eventForm').publishAt.addEventListener('input', updateSaveLabel);
 $('#liveToggle').addEventListener('change', connectLive);
 $('#statusFilter').addEventListener('change', (e) => { state.status = e.target.value; state.page = 1; loadItems(); });
 

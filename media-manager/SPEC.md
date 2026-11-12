@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.3.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.4.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.4:** **relations** between streams with `?populate`, **per-stream API keys** with scopes, and **scheduled publishing and unpublishing** (`publishAt` / `unpublishAt`). All 0.3 requests still work unchanged.
+>
 > **Changes from 0.2:** "events" are now called **items**, because a stream can hold any kind of record. `/events` still works as an alias of `/items`. In stream objects, `eventCount` and `lastEventAt` were renamed to `itemCount` and `lastItemAt`. 0.3 adds templates, display labels, draft & publish, new field types, unique constraints, retention and webhooks.
 
 ---
@@ -27,15 +29,25 @@ Both modules share one server, one admin UI, one API token and one data director
 | **Sequence (`seq`)** | A number that goes up by one for each item in a stream (1, 2, 3, …) and never repeats. Clients use it for polling and for resuming a live feed. |
 | **Retention** | Optional per-stream limits on how many items to keep and for how long. |
 | **Webhook** | A URL that receives a signed `POST` for each item change. |
+| **Relation** | A field whose value is the id (or ids) of items in another stream, or the same stream. Example: a post's `author` pointing at an item in an `authors` stream. |
+| **API key** | A credential that works for **one stream** only, with chosen permissions (`read`, `create`, `update`, `delete`). Use it so a device or partner never holds the main token. |
+| **Schedule** | A `publishAt` and/or `unpublishAt` time on an item in a draft & publish stream. The server publishes or unpublishes the item when that time comes. |
 
 ## 2. Access & conventions
 
 - **Base URL:** `http://<host>:<port>` (default port `1338`).
-- **Auth:** writes (`POST`, `PUT`, `PATCH`, `DELETE`) need `Authorization: Bearer <MEDIA_API_TOKEN>` when the server has a token configured. Reads are public, with these exceptions:
-  - **Drafts** are visible only to requests that send the token.
-  - **Webhook configuration**, which includes the signing secrets, appears in stream objects only for requests that send the token.
-  - For the live feed, which browsers can't send headers to, the token can be passed as `?access_token=`.
-  - If no token is configured, every request is treated as authorized. That is meant for local development only.
+- **Auth:** there are two kinds of credential, both sent as `Authorization: Bearer <credential>`:
+
+  | Credential | Can do |
+  | --- | --- |
+  | **Main token** (`MEDIA_API_TOKEN`) | Everything: all streams, stream settings, API keys, webhooks, the media library |
+  | **Stream API key** (`mmk_…`) | Only the item operations its scopes allow, on its own stream (§10). It can't change stream settings, keys or webhooks, or reach the media library. |
+
+  Reads are public, with these exceptions:
+  - **Drafts** are visible only with the main token or a key with the `read` scope.
+  - **Webhook and API key configuration** appears in stream objects only for the main token.
+  - For the live feed, which browsers can't send headers to, the credential can be passed as `?access_token=`.
+  - If no main token is configured, every request is treated as authorized. That is meant for local development only.
 - **Content type:** JSON (`application/json`). Media uploads are `multipart/form-data`.
 - **Timestamps:** ISO 8601 in UTC, e.g. `2026-11-12T20:35:39.359Z`. The API accepts any string `Date` can parse, or epoch milliseconds, and always returns the normalized form.
 - **IDs:** UUID v4 strings.
@@ -62,10 +74,11 @@ Both modules share one server, one admin UI, one API token and one data director
 | Status | When |
 | --- | --- |
 | `400` | Invalid JSON, a validation failure (`details.errors` lists **every** problem), an unknown filter or sort field, an attempt to change a slug, or a publish action on a stream without draft & publish |
-| `401` | Missing or invalid token on a write, or when reading drafts |
+| `401` | Missing, invalid or expired credential on a write or a draft read, or a stream key used where only the main token is allowed |
+| `403` | A valid stream key that lacks the scope this operation needs |
 | `404` | The stream, item, webhook, file or folder doesn't exist. Drafts also return `404` to anonymous readers. |
 | `405` | The method isn't supported on this route |
-| `409` | A duplicate stream slug or folder name, or deleting a folder that isn't empty |
+| `409` | A duplicate stream slug or folder name, deleting a folder that isn't empty, or deleting a stream other streams relate to |
 | `413` | The body is larger than the limit |
 | `500` | Unexpected server error. The details are logged on the server and not exposed. |
 
@@ -91,6 +104,7 @@ In a batch, the paths are prefixed with the item's index: `[3].data.total`.
 | `tags` | Array of strings | none | array of unique trimmed strings (≤ 100 tags, ≤ 64 chars each); `[]` when empty |
 | `json` | Any JSON value | none | as sent |
 | `media` | The `id` of an existing media file | none | string (UUID) |
+| `relation` | The id of an item in the `target` stream, or an array of ids when `multiple` | `target` (stream slug, required), `multiple` (default `false`) | string, or array of unique ids (≤ 100); `[]` when empty and `multiple` |
 
 Every field can also have `required` (default `false`) and `description` (≤ 500 chars).
 
@@ -101,7 +115,7 @@ Every field can also have `required` (default `false`) and `description` (≤ 50
 1. A key in `data` that isn't a field is rejected (for streams that have fields).
 2. A missing value, `null`, `""` or `[]` counts as empty. Empty is an error if the field is `required` **and the item is being published**. Required fields aren't enforced on drafts (§6). Empty values are stored as `null`, or `[]` for tags.
 3. Values are not converted between types. `"42"` is rejected for an `integer` field. `datetime` values are normalized to UTC; tags are trimmed and de-duplicated.
-4. `media` must refer to a file that exists when the item is written or published.
+4. `media` must refer to a file that exists when the item is written or published. Likewise, `relation` ids must refer to items that exist in the target stream (drafts included). Unknown ids are reported per field: `no authors item with id …`.
 
 ### 3.2 Unique values and UIDs
 
@@ -109,7 +123,25 @@ Every field can also have `required` (default `false`) and `description` (≤ 50
 - A `uid` field with a `targetField` (which must be a `string` or `text` field) is **generated automatically** when left empty: `"Hello World!"` becomes `hello-world`. If that value is taken, the server tries `hello-world-2`, `hello-world-3` and so on. Generated values never cause a clash error; values you provide explicitly do.
 - Uniqueness also holds within one batch request.
 
-### 3.3 Changing a dataset
+### 3.3 Relations
+
+```json
+{ "name": "author",     "type": "relation", "target": "authors" }
+{ "name": "categories", "type": "relation", "target": "categories", "multiple": true }
+{ "name": "related",    "type": "relation", "target": "posts", "multiple": true }
+```
+
+The third example is a self-relation: a stream can relate to its own items.
+
+- **Writing:** send ids, e.g. `"author": "0b7c…"` or `"categories": ["a1…", "b2…"]`. Duplicate ids are removed.
+- **Reading:** items always store and return **ids**. Add `?populate=*` (all relation fields) or `?populate=author,categories` to a list or get request to replace them with the related items. Populating goes one level deep, and the related items keep their own relation ids.
+- **Visibility when populating:** drafts in the target stream are included only for requesters who can read drafts *in that stream*, meaning the main token or a key for that stream with `read`. Otherwise a single relation becomes `null` and drafts are left out of lists.
+- **Filtering:** `filter[author]=<id>` matches a single relation. `filter[categories]=<id>` matches items whose list contains that id, and `[ne]` matches items whose list doesn't.
+- **When a related item is deleted**, references to it are removed automatically: single relations become `null`, and the id is taken out of lists. This also applies to deletions by retention. Each changed item is sent as `updated` to subscribers, and to webhooks unless retention caused the deletion. A *required* relation can become empty this way; the item stays as it is but can't be re-published until the field is filled.
+- **Deleting a stream** that other streams relate to returns `409`, naming the streams and fields involved. Remove those fields first.
+- The target must be an existing stream, or the stream itself.
+
+### 3.4 Changing a dataset
 
 Fields can be added, removed, reordered or retyped at any time. **Existing items are not migrated.** The new dataset is enforced when items are created, edited or published. When an item is edited, data for fields that no longer exist is dropped.
 
@@ -139,6 +171,8 @@ Fields can be added, removed, reordered or retyped at any time. **Existing items
 | `DELETE` | `/api/streams/:slug/items/:id` | Delete an item |
 | `POST` | `/api/streams/:slug/items/:id/publish` | Publish (draft & publish streams only) |
 | `POST` | `/api/streams/:slug/items/:id/unpublish` | Back to draft |
+| `GET` / `POST` | `/api/streams/:slug/keys` | List / create API keys (main token only) |
+| `GET` / `PATCH` / `DELETE` | `/api/streams/:slug/keys/:id` | Get, change or revoke a key (main token only) |
 
 `/events` can be used anywhere `/items` appears.
 
@@ -162,15 +196,17 @@ Fields can be added, removed, reordered or retyped at any time. **Existing items
   ],
   "itemCount": 12,
   "draftCount": 3,
+  "scheduledCount": 1,
   "lastItemAt": "2026-11-12T20:35:39.359Z",
   "webhooks": [ … ],
+  "apiKeys": [ … ],
   "createdAt": "2026-11-12T20:30:00.000Z",
   "updatedAt": "2026-11-12T20:31:12.000Z"
 }
 ```
 
 - `itemCount` is the number of items **this requester can see**: published items only for anonymous readers on draft & publish streams.
-- `draftCount` and `webhooks` are included only for authorized requests.
+- `draftCount` and `scheduledCount` are included for requesters who can read drafts. `webhooks` and `apiKeys` (without secrets) are included only for the main token.
 - `lastItemAt` is the newest item **timestamp** among the items the requester can see.
 
 ### 4.3 Create a stream: `POST /api/streams`
@@ -204,7 +240,7 @@ Values you send override the template's. The response is `201` with the stream o
 Both methods do a partial update: only the keys you send change. Sending `fields` or `webhooks` replaces that whole list. Sending a `slug` that differs from the current one returns `400`.
 
 - **Turning draft & publish on:** items created before it was enabled are treated as already published.
-- **Turning it off:** every item becomes publicly visible, drafts included.
+- **Turning it off:** every item becomes publicly visible, drafts included. Pending schedules are kept but don't fire while it's off.
 - **Changing `retention`:** the new limits apply immediately (§7).
 
 ### 4.5 Delete a stream: `DELETE /api/streams/:slug`
@@ -225,6 +261,8 @@ Permanently deletes the stream and its item log. Live subscribers get a `stream-
   "timestamp": "2026-11-12T20:35:39.359Z",
   "data": { "title": "Hello World", "slug": "hello-world", "body": "# Hi", "tags": ["news"] },
   "publishedAt": "2026-11-12T21:00:00.000Z",
+  "publishAt": null,
+  "unpublishAt": "2026-12-31T23:59:59.000Z",
   "createdAt": "2026-11-12T20:35:39.360Z",
   "updatedAt": "2026-11-12T21:00:00.000Z"
 }
@@ -232,6 +270,8 @@ Permanently deletes the stream and its item log. Live subscribers get a `stream-
 
 - `timestamp` is **when the item happened or is dated**. The client can set it, and it defaults to the time the server received the item. Time-range filters, the default sort and retention use it.
 - `publishedAt` is `null` for drafts. On streams without draft & publish it equals `createdAt`.
+- `publishAt` and `unpublishAt` hold pending schedules (§6.1). They exist only on draft & publish streams and are `null` when nothing is scheduled.
+- `scheduleError` appears only after a scheduled publish failed, and explains why (§6.1).
 - `seq` is assigned when the item is created and never changes.
 
 ### 5.2 Create: `POST /api/streams/:slug/items` (or `POST /api/streams/:slug`)
@@ -240,7 +280,7 @@ Permanently deletes the stream and its item log. Live subscribers get a `stream-
 { "data": { "title": "Hello World", "body": "# Hi" }, "timestamp": "2026-11-12T09:00:00Z", "publish": true }
 ```
 
-`timestamp` and `publish` are optional. On draft & publish streams, items are drafts unless the body includes `"publish": true`; `publish` is ignored on other streams. The response is `201` with the item.
+`timestamp`, `publish`, `publishAt` and `unpublishAt` are optional. On draft & publish streams, items are drafts unless the body includes `"publish": true`; `publish` is ignored on other streams. The response is `201` with the item.
 
 **Batch:** send an array of the same objects, up to 1000. The response is `201` with the items in the order you sent them. A batch is **all-or-nothing**: one invalid item rejects the whole request, and the error paths say which items failed (`[1].data.total`).
 
@@ -251,8 +291,9 @@ The fields must be inside `data`. A body like `{ "title": "A" }` is rejected wit
 | Parameter | Example | Behavior |
 | --- | --- | --- |
 | `page`, `pageSize` | `page=2&pageSize=100` | Default `pageSize` is 25, max 500 |
-| `sort` | `sort=data.price:asc` | Key: `timestamp`, `createdAt`, `updatedAt`, `publishedAt`, `seq` or `data.<field>`. Direction: `:asc` (default) or `:desc`. Without `sort`, the order is `timestamp:desc`, or `seq:asc` when `after` is set. Empty values sort last; ties are broken by `seq`. |
-| `status` | `status=draft` | Draft & publish streams only. `published` (default), `draft` or `all`. `draft` and `all` need the token. |
+| `sort` | `sort=data.price:asc` | Key: `timestamp`, `createdAt`, `updatedAt`, `publishedAt`, `publishAt`, `seq` or `data.<field>`. Direction: `:asc` (default) or `:desc`. Without `sort`, the order is `timestamp:desc`, or `seq:asc` when `after` is set. Empty values sort last; ties are broken by `seq`. |
+| `status` | `status=draft` | Draft & publish streams only. `published` (default), `draft` (includes scheduled), `scheduled` (drafts with a `publishAt`) or `all`. Everything except `published` needs the main token or a `read` key. |
+| `populate` | `populate=*` | Replace relation ids with the related items (§3.3) |
 | `since` / `until` | `since=2026-11-01T00:00:00Z` | `timestamp ≥ since` / `timestamp < until` |
 | `after` | `after=42` | `seq > 42`. Use it for polling (§9.2). |
 | `filter[<field>]` | `filter[slug]=hello-world` | Equals |
@@ -272,9 +313,9 @@ Filter details:
 
 | Method | Body | Behavior |
 | --- | --- | --- |
-| `GET …/items/:id` | none | `200` with the item. A draft returns `404` to anonymous readers. |
-| `PUT …/items/:id` | `{ "data": {…}, "timestamp"?, "publish"? }` | Replaces `data` completely. `data` is required. |
-| `PATCH …/items/:id` | `{ "data"?: {…}, "timestamp"?, "publish"? }` | Merges the keys you send into the existing `data`. |
+| `GET …/items/:id` | none | `200` with the item (`?populate=` supported). A draft returns `404` to anyone who can't read drafts. |
+| `PUT …/items/:id` | `{ "data": {…}, "timestamp"?, "publish"?, "publishAt"?, "unpublishAt"? }` | Replaces `data` completely. `data` is required. |
+| `PATCH …/items/:id` | `{ "data"?: {…}, "timestamp"?, "publish"?, "publishAt"?, "unpublishAt"? }` | Merges the keys you send into the existing `data`. |
 | `DELETE …/items/:id` | none | `200` with the deleted item. The `seq` is not reused. |
 
 `"publish": true` or `false` in a `PUT` or `PATCH` body also changes the status, as in §6.
@@ -295,6 +336,29 @@ When `draftAndPublish` is on:
 - **Unpublish:** `POST …/items/:id/unpublish`, or `"publish": false`. `publishedAt` becomes `null`.
 - When a published item is edited it stays published, and required fields are enforced on the edit.
 - The publish and unpublish endpoints return `400` on streams where draft & publish is off.
+- Publishing by hand clears a pending `publishAt`; unpublishing by hand clears a pending `unpublishAt`.
+
+### 6.1 Scheduling
+
+Set `publishAt` and/or `unpublishAt` on create, `PUT` or `PATCH`. To cancel a schedule, send `null`:
+
+```http
+PATCH /api/streams/blog/items/0b7c…
+{ "publishAt": "2026-12-01T09:00:00Z", "unpublishAt": "2026-12-31T23:59:59Z" }
+```
+
+| Rule | |
+| --- | --- |
+| Needs draft & publish | On other streams the request returns `400`. |
+| Validated when scheduled | A `publishAt` enforces required fields at save time, as publishing does. |
+| `publishAt` only on drafts | On a published item it returns `400`; unpublish first, or set `unpublishAt`. |
+| Not together with `"publish": true` | `400`: choose one. |
+| `unpublishAt` needs a published or scheduled item | It must also be later than `publishAt`. |
+| Times in the past take effect immediately | `publishAt: "2020-01-01"` publishes now. |
+| Precision | The server checks for due items every 15 seconds and right after starting up, so an item goes live within about 15 s of its time, and anything that fell due while the server was down fires on restart. |
+| Re-validated when it fires | If the item is no longer valid by then (for example the dataset gained a required field, or a related item was deleted), it **stays a draft**. Its `publishAt` is cleared and `scheduleError` says why. A successful reschedule clears the error. |
+| Notifications | A scheduled publish or unpublish behaves exactly like a manual one: live subscribers get `published`/`unpublished` (or `created`/`deleted` in the public view), and webhooks get `item.published`/`item.unpublished`. |
+
 
 ---
 
@@ -369,7 +433,7 @@ X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the raw body, keyed with the sec
 
 [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html) (`text/event-stream`). Subscribers get one of two views:
 
-| Change | **Editor view** (token in the header, or `?access_token=`) | **Public view** (no token) |
+| Change | **Editor view** (main token or a `read` key, in the header or `?access_token=`) | **Public view** (no credential) |
 | --- | --- | --- |
 | Item created | `created` (full item, `id:` = seq) | `created`, only if the item is visible |
 | Item updated | `updated` (full item) | `updated`, only if the item is visible |
@@ -403,7 +467,34 @@ Returns a JSON Schema (draft 2020-12) for the item `data` object. Optional field
 
 ---
 
-## 10. Media Library API (summary)
+## 10. Per-stream API keys
+
+Keys are managed with the main token, either in the admin UI (*Settings → API keys*) or through the API:
+
+```http
+POST /api/streams/orders/keys
+{ "name": "Warehouse scanner", "scopes": ["create"], "expiresAt": "2027-01-01T00:00:00Z" }
+
+→ 201 { "id": "…", "name": "Warehouse scanner", "prefix": "mmk_JhRcQTWj", "scopes": ["create"],
+        "expiresAt": "2027-01-01T00:00:00.000Z", "createdAt": "…", "lastUsedAt": null,
+        "key": "mmk_JhRcQTWjy-jMlu0dZjgRjuZaTs7tigcD" }   ← shown only this once
+```
+
+| Scope | Allows (on its own stream only) |
+| --- | --- |
+| `read` | Reading drafts: `status=draft`, `scheduled` or `all`, drafts by id, `draftCount`, and the editor view of the live feed |
+| `create` | `POST` items, single or batch, including `publish`/`publishAt` on create |
+| `update` | `PUT` / `PATCH` items, publish, unpublish and scheduling |
+| `delete` | `DELETE` items |
+
+- Published items are public anyway, so a key isn't needed to read them.
+- **Only a SHA-256 hash is stored.** The full key is returned once, when it is created. Listings show the `prefix` so you can tell keys apart.
+- `PATCH /keys/:id` can change `name`, `scopes` and `expiresAt` (a future time, or `null`). `DELETE /keys/:id` revokes the key immediately.
+- An expired or revoked key gets `401`. A valid key without the needed scope gets `403`. A key used on another stream, on stream settings, or on the media library gets `401`.
+- `lastUsedAt` is updated on use; it is saved to disk at most every 30 seconds.
+- A stream can have up to 50 keys.
+
+## 11. Media Library API (summary)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -417,7 +508,7 @@ Returns a JSON Schema (draft 2020-12) for the item `data` object. Optional field
 | `GET` / `PUT` / `DELETE` | `/api/upload/folders/:id` | Get, rename or move, delete (`409` if not empty) |
 | `GET` | `/uploads/:file` | Serve the binary. Supports `Range`; add `?download` to download it as an attachment. |
 
-## 11. Other endpoints
+## 12. Other endpoints
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -426,7 +517,7 @@ Returns a JSON Schema (draft 2020-12) for the item `data` object. Optional field
 
 ---
 
-## 12. Admin UI
+## 13. Admin UI
 
 | Page | Path | Capabilities |
 | --- | --- | --- |
@@ -436,24 +527,26 @@ Returns a JSON Schema (draft 2020-12) for the item `data` object. Optional field
 **Streams page:**
 
 - **Create a stream:** a template picker (Blank, Event log, Blog posts, Social feed, Products), plus the name, a slug (auto-generated, editable) and the field builder, pre-filled from the template.
-- **Items tab:** named after the stream's labels, e.g. "Posts".
+- **Items tab:** named after the stream's labels, e.g. "Posts". Relation columns show the related items' names, and scheduled items show their publish time in the status column.
   - A table with sortable columns, a status column and a Status filter (All, Published, Drafts) on draft & publish streams, and a field filter.
   - A *Live* toggle that updates the table over SSE, including drafts when a token is set.
   - The item form is generated from the dataset. Markdown fields get a large editor, UID fields a "Generate" button, tags a comma-separated input, and media fields a picker of uploaded files.
-  - Its buttons are *Save draft*, *Publish* / *Save & publish* and *Unpublish*, depending on the item's state.
-- **Dataset tab:** the field builder. It covers every type in §3, with required, unique, length, min/max, enum options and the UID source field, and lets you reorder fields.
-- **Settings tab:** labels, the draft & publish toggle and retention limits. You confirm before stricter limits delete anything. It also edits webhooks: URL, events, enabled, secret (copy or rotate), last delivery status, and *Send test*. The *Delete stream* button is here too; you confirm by typing the slug.
+  - Relation fields get a dropdown (single) or a searchable checklist (multiple) of the related stream's items; drafts are marked.
+  - *Publish at* and *Unpublish at* inputs schedule the item, and *Save draft* becomes *Schedule* once a time is entered. A failed scheduled publish is shown at the top of the form.
+  - Its buttons are *Save draft* / *Schedule*, *Publish* / *Save & publish* and *Unpublish*, depending on the item's state.
+- **Dataset tab:** the field builder. It covers every type in §3, with required, unique, length, min/max, enum options, the UID source field, and the target stream and "Many" option for relations. It also lets you reorder fields.
+- **Settings tab:** labels, the draft & publish toggle and retention limits. *API keys* lists each key (name, prefix, scopes, created, last used, expiry) with a *Revoke* button, and creates keys, showing the secret once with a copy button. You confirm before stricter limits delete anything. It also edits webhooks: URL, events, enabled, secret (copy or rotate), last delivery status, and *Send test*. The *Delete stream* button is here too; you confirm by typing the slug.
 - **API tab:** the endpoint list and copy-paste examples for that stream: create, list, filter, get by slug, poll, subscribe, and verifying a webhook signature. It also links to the stream's JSON Schema.
 
 The selected stream and tab are kept in the URL (`/streams.html?stream=blog&tab=settings`).
 
 ---
 
-## 13. Storage & operations
+## 14. Storage & operations
 
 ```
 $MEDIA_DATA_DIR/
-├── db.json                 # files, folders and stream definitions, including webhook secrets (rewritten atomically)
+├── db.json                 # files, folders, stream definitions, webhook secrets, API key hashes (rewritten atomically)
 ├── uploads/<hash>.<ext>    # media binaries
 └── events/<streamId>.jsonl # one append-only item log per stream
 ```
@@ -469,21 +562,22 @@ $MEDIA_DATA_DIR/
 | `MEDIA_DATA_DIR` | `./data` | Data directory |
 | `MEDIA_MAX_FILE_SIZE` | `52428800` | Per-file upload limit in bytes |
 
-## 14. Limits & non-goals (current version)
+## 15. Limits & non-goals (current version)
 
 | Area | Limit / behavior |
 | --- | --- |
 | Scale | It runs as a single process and keeps everything in memory. It's comfortable up to about 100k items per stream; unique checks scan the stream once per write request. A SQLite or Postgres backend would remove this limit without changing the API. |
-| Auth | There is one shared token with full access. There are no users, roles or per-stream keys. |
-| Content | No relations between streams other than `media`, and no localization or version history. Markdown isn't rendered server-side. |
+| Auth | One main token with full access, plus per-stream keys with item-level scopes. There are no user accounts, roles or field-level permissions, and nothing is rate-limited per key. |
+| Content | Populating goes one level deep. No localization or version history. Markdown isn't rendered server-side. |
+| Scheduling | Precision is about 15 seconds. Schedules use absolute UTC times; there are no recurring schedules. |
 | Webhooks | The delivery queue lives in memory: pending retries are lost on restart. Redirects aren't followed. Destinations aren't restricted, so only token holders should be able to configure them. |
 | Rate limiting / CORS | Neither is built in. Put a reverse proxy in front if the API is exposed publicly or used across origins. |
 
-## 15. Possible next steps
+## 16. Possible next steps
 
-- Per-stream API keys (write-only ingest keys and read keys)
-- Relations between streams (e.g. a post's `author` pointing at an item in an `authors` stream), with `populate`
 - Aggregations (`count`, `sum` and `avg` grouped by field or time bucket) and CSV / NDJSON export
-- Scheduled publishing (`publishAt`) and version history
+- Version history (restore an earlier version of an item)
+- Deeper populate (`populate[author][populate]=avatar`) and media population
 - A persistent webhook queue with a delivery log
+- Rate limits per API key
 - SQLite storage backend

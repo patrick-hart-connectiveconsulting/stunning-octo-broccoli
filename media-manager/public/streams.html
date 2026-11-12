@@ -70,6 +70,7 @@
             <button role="tab" data-tab="items" aria-selected="true" id="itemsTab">Items</button>
             <button role="tab" data-tab="dataset">Dataset</button>
             <button role="tab" data-tab="settings">Settings</button>
+            <button role="tab" data-tab="embed">Embed</button>
             <button role="tab" data-tab="api">API</button>
           </div>
 
@@ -200,6 +201,11 @@
             </div>
           </div>
 
+          <!-- Embed -->
+          <div class="tab-panel" data-panel="embed" hidden>
+            <div id="embedPanel"></div>
+          </div>
+
           <!-- API -->
           <div class="tab-panel" data-panel="api" hidden>
             <div id="apiDocs"></div>
@@ -275,6 +281,7 @@
   </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script type="module" src="/ui/streams-ui.js"></script>
   <script type="module" src="/streams.js"></script>
 </body>
 </html>

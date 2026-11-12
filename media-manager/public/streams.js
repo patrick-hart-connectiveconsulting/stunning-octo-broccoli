@@ -2,6 +2,7 @@
 // their datasets, manage items, publishing, retention and webhooks.
 
 import { $, h, api, toast, formatDate, debounce, copyText, getToken, initShell } from './common.js';
+import { renderEmbed } from './embed.js';
 
 const FIELD_TYPES = [
   ['string', 'Short text'],
@@ -285,7 +286,7 @@ function renderDetail() {
 }
 
 function selectTab(tab) {
-  if (!['items', 'dataset', 'settings', 'api'].includes(tab)) tab = 'items';
+  if (!['items', 'dataset', 'settings', 'embed', 'api'].includes(tab)) tab = 'items';
   state.tab = tab;
   for (const b of document.querySelectorAll('[role=tab]')) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
   for (const p of document.querySelectorAll('.tab-panel')) p.hidden = p.dataset.panel !== tab;
@@ -293,6 +294,7 @@ function selectTab(tab) {
   if (tab === 'dataset') renderDataset();
   if (tab === 'settings') renderSettings();
   if (tab === 'api') renderApiDocs();
+  if (tab === 'embed') renderEmbed($('#embedPanel'), { stream: state.current, config: state.config });
   setUrl();
 }
 

@@ -1,31 +1,6 @@
-// Media Manager admin UI — vanilla JS, no build step.
+// Media Library admin page — vanilla JS, no build step.
 
-const $ = (sel) => document.querySelector(sel);
-
-/** Tiny DOM builder. Text is always set via textContent, never innerHTML. */
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k in el && typeof v !== 'string') el[k] = v;
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const c of children.flat()) {
-    if (c == null || c === false) continue;
-    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
-  return el;
-}
-
-function svg(markup, viewBox = '0 0 24 24') {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  el.setAttribute('viewBox', viewBox);
-  el.setAttribute('aria-hidden', 'true');
-  el.innerHTML = markup; // static, trusted icon markup only
-  return el;
-}
+import { $, h, svg, api, toast, formatBytes, formatDate, debounce, copyText, getToken, promptToken, initShell } from './common.js';
 
 const ICONS = {
   folder: '<path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2z" fill="currentColor"/>',
@@ -48,42 +23,16 @@ const state = {
   selected: new Set(),
   allFolders: [],
   config: { authRequired: false, maxFileSize: 0 },
-  token: safeStorage('get', 'mm-token') || '',
 };
 
-function safeStorage(op, key, value) {
-  try {
-    if (op === 'get') return localStorage.getItem(key);
-    if (op === 'set') localStorage.setItem(key, value);
-    if (op === 'del') localStorage.removeItem(key);
-  } catch { /* storage unavailable */ }
-  return null;
-}
-
 // ---- API -------------------------------------------------------------------
-
-async function api(path, { method = 'GET', body, json } = {}) {
-  const headers = {};
-  if (state.token) headers.Authorization = `Bearer ${state.token}`;
-  if (json !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(json);
-  }
-  const res = await fetch(path, { method, headers, body });
-  const data = res.status === 204 ? null : await res.json().catch(() => null);
-  if (!res.ok) {
-    if (res.status === 401) promptToken();
-    throw new Error(data?.error?.message || `Request failed (${res.status})`);
-  }
-  return data;
-}
 
 /** Upload with progress events (fetch can't report upload progress). */
 function uploadWithProgress(path, formData, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', path);
-    if (state.token) xhr.setRequestHeader('Authorization', `Bearer ${state.token}`);
+    if (getToken()) xhr.setRequestHeader('Authorization', `Bearer ${getToken()}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let data = null;
@@ -101,25 +50,9 @@ function uploadWithProgress(path, formData, onProgress) {
 
 // ---- helpers ---------------------------------------------------------------
 
-function formatBytes(n) {
-  if (n == null) return '—';
-  if (n < 1024) return `${n} B`;
-  const units = ['KB', 'MB', 'GB'];
-  let i = -1;
-  do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
-  return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
-}
-
-const formatDate = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 const kind = (mime) => (mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'file');
 const extLabel = (f) => (f.ext || '').replace('.', '') || f.mime.split('/')[1] || 'file';
 const absoluteUrl = (url) => new URL(url, location.origin).href;
-
-function toast(message, type = 'success') {
-  const el = h('div', { class: `toast ${type}`, role: type === 'error' ? 'alert' : 'status' }, message);
-  $('#toasts').append(el);
-  setTimeout(() => el.remove(), 4000);
-}
 
 function folderLabel(f) {
   return f.path.map((p) => p.name).join(' / ');
@@ -512,28 +445,7 @@ async function removeFolder() {
   }
 }
 
-// ---- token -----------------------------------------------------------------
-
-function updateTokenLabel() {
-  $('#tokenBtn').hidden = !state.config.authRequired;
-  $('#tokenLabel').textContent = state.token ? 'API token set' : 'Set API token';
-}
-
-function promptToken() {
-  const value = prompt('This media library requires an API token for changes.\nEnter the MEDIA_API_TOKEN value:', state.token);
-  if (value === null) return;
-  state.token = value.trim();
-  if (state.token) safeStorage('set', 'mm-token', state.token);
-  else safeStorage('del', 'mm-token');
-  updateTokenLabel();
-}
-
 // ---- wiring ----------------------------------------------------------------
-
-function debounce(fn, ms) {
-  let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-}
 
 $('#search').addEventListener('input', debounce((e) => { state.q = e.target.value.trim(); state.page = 1; load(); }, 250));
 $('#typeFilter').addEventListener('change', (e) => { state.type = e.target.value; state.page = 1; load(); });
@@ -564,7 +476,6 @@ $('#moveForm').addEventListener('submit', async (e) => {
 $('#uploadBtn').addEventListener('click', () => openUpload());
 $('#emptyUpload').addEventListener('click', () => openUpload());
 $('#newFolderBtn').addEventListener('click', () => editFolder());
-$('#tokenBtn').addEventListener('click', promptToken);
 $('[data-nav=root]').addEventListener('click', (e) => { e.preventDefault(); openFolder(null); });
 
 $('#fileInput').addEventListener('change', (e) => { addToQueue(e.target.files); e.target.value = ''; });
@@ -578,14 +489,7 @@ $('#assetForm').addEventListener('submit', saveAsset);
 $('#deleteAsset').addEventListener('click', async () => {
   if (await deleteAssets([currentAsset.id])) $('#assetDialog').close();
 });
-$('#copyLink').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(absoluteUrl(currentAsset.url));
-    toast('Link copied to clipboard');
-  } catch {
-    prompt('Copy this link:', absoluteUrl(currentAsset.url));
-  }
-});
+$('#copyLink').addEventListener('click', () => copyText(absoluteUrl(currentAsset.url)));
 $('#replaceBtn').addEventListener('click', () => $('#replaceInput').click());
 $('#replaceInput').addEventListener('change', (e) => {
   if (e.target.files[0]) replaceAsset(e.target.files[0]);
@@ -597,7 +501,6 @@ $('#assetDialog').addEventListener('close', () => {
 });
 
 $('#folderForm').addEventListener('submit', saveFolder);
-document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
 $('#deleteFolder').addEventListener('click', removeFolder);
 
 // Page-wide drag & drop opens the upload dialog.
@@ -622,9 +525,6 @@ window.addEventListener('popstate', () => {
 
 (async function init() {
   state.folder = new URL(location).searchParams.get('folder');
-  try {
-    state.config = await api('/api/config');
-  } catch { /* fall back to defaults */ }
-  updateTokenLabel();
+  state.config = await initShell();
   await load();
 })();

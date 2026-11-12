@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 export class Store {
   constructor(file) {
     this.file = file;
-    this.data = { files: [], folders: [] };
+    this.data = { files: [], folders: [], streams: [] };
     this.queue = Promise.resolve();
   }
 
@@ -19,6 +19,7 @@ export class Store {
       const parsed = JSON.parse(await readFile(this.file, 'utf8'));
       this.data.files = parsed.files || [];
       this.data.folders = parsed.folders || [];
+      this.data.streams = parsed.streams || [];
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
       await this.flush();
@@ -28,12 +29,14 @@ export class Store {
 
   flush() {
     const snapshot = JSON.stringify(this.data, null, 2);
-    this.queue = this.queue.then(async () => {
+    const write = this.queue.then(async () => {
       const tmp = `${this.file}.${process.pid}.tmp`;
       await writeFile(tmp, snapshot);
       await rename(tmp, this.file);
     });
-    return this.queue;
+    // Keep the chain alive even if one write fails; the caller still sees the error.
+    this.queue = write.catch(() => {});
+    return write;
   }
 
   // ---- files -------------------------------------------------------------
@@ -111,6 +114,36 @@ export class Store {
     const idx = this.data.folders.findIndex((f) => f.id === id);
     if (idx === -1) return null;
     const [removed] = this.data.folders.splice(idx, 1);
+    await this.flush();
+    return removed;
+  }
+
+  // ---- streams -----------------------------------------------------------
+
+  getStream(slugOrId) {
+    return this.data.streams.find((s) => s.slug === slugOrId || s.id === slugOrId) || null;
+  }
+
+  async addStream(fields) {
+    const now = new Date().toISOString();
+    const stream = { id: randomUUID(), ...fields, createdAt: now, updatedAt: now };
+    this.data.streams.push(stream);
+    await this.flush();
+    return stream;
+  }
+
+  async updateStream(id, patch) {
+    const stream = this.getStream(id);
+    if (!stream) return null;
+    Object.assign(stream, patch, { updatedAt: new Date().toISOString() });
+    await this.flush();
+    return stream;
+  }
+
+  async removeStream(id) {
+    const idx = this.data.streams.findIndex((s) => s.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.data.streams.splice(idx, 1);
     await this.flush();
     return removed;
   }

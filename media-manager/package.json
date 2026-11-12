@@ -1,8 +1,8 @@
 {
   "name": "media-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "A lightweight, dependency-free media library inspired by Strapi's upload plugin",
+  "description": "A lightweight, dependency-free media library and event streams API inspired by Strapi",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

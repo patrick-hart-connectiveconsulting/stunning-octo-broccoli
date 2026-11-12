@@ -1,6 +1,33 @@
 # Media Manager
 
-A lightweight media library inspired by Strapi's Media Library (upload plugin). It needs only Node.js 20+ and has no `npm install` step or build step.
+A lightweight, self-hosted alternative to Strapi. It needs only Node.js 20+ and has no `npm install` step or build step. It has two modules:
+
+- **Media Library**: upload, organize and serve files.
+- **Streams**: create event endpoints in the admin UI, define the dataset (typed fields) each one accepts, then post, fetch, filter and subscribe to events over a REST API.
+
+**Full specification: [SPEC.md](SPEC.md)**
+
+## Streams in 30 seconds
+
+```bash
+# create a stream with a dataset
+curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Order events","fields":[{"name":"orderId","type":"string","required":true},{"name":"total","type":"number"}]}' \
+  http://localhost:1338/api/streams
+
+# post an event to it
+curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"data":{"orderId":"A-100","total":42.5}}' \
+  http://localhost:1338/api/streams/order-events
+
+# fetch, filter, subscribe
+curl -g "http://localhost:1338/api/streams/order-events/events?filter[total][gte]=10&sort=timestamp:desc"
+curl -N  "http://localhost:1338/api/streams/order-events/subscribe"
+```
+
+The admin page for streams is at `/streams.html`. It has a field builder, an events table with live updates, and per-stream API docs with copy-paste examples.
+
+## Media Library
 
 - **Admin UI**: grid of assets with previews, folders and breadcrumbs, search, type filter, sorting, pagination, drag-and-drop uploads with progress bars, an asset details panel (rename, alt text, caption, move, replace, download, copy link, delete), and bulk move/delete. Light and dark themes.
 - **REST API**: Strapi-style `/api/upload` endpoints, so content front-ends can use it the same way.
@@ -11,19 +38,21 @@ A lightweight media library inspired by Strapi's Media Library (upload plugin). 
 ```bash
 cd media-manager
 MEDIA_API_TOKEN=change-me npm start     # http://localhost:1338
-npm test                                # API test suite (node:test)
+npm test                                # API test suites (node:test)
 ```
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `PORT` / `HOST` | `1338` / `0.0.0.0` | Listen address |
 | `MEDIA_API_TOKEN` | *(unset)* | Bearer token required for every write. **If unset, writes are open**, so set it anywhere other than your own machine. |
-| `MEDIA_DATA_DIR` | `./data` | Where `db.json` and `uploads/` live |
+| `MEDIA_DATA_DIR` | `./data` | Where `db.json`, `uploads/` and `events/` live |
 | `MEDIA_MAX_FILE_SIZE` | `52428800` (50 MB) | Per-file upload limit in bytes |
 
 Reads (listing and fetching files) are public. When a token is configured, the UI asks for it the first time you make a change and remembers it in the browser.
 
-## API
+## Media API
+
+The Streams API is documented in [SPEC.md](SPEC.md#4-streams-api).
 
 | Method & path | Description |
 | --- | --- |

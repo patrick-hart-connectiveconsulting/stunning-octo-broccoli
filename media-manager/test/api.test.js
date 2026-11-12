@@ -49,6 +49,7 @@ before(async () => {
 
 after(async () => {
   server.close();
+  server.closeAllConnections();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -156,7 +157,7 @@ test('full lifecycle: folders, upload, list, update, replace, delete', async () 
 
   // persisted to disk
   const db = JSON.parse(await readFile(join(dir, 'db.json'), 'utf8'));
-  assert.deepEqual(db, { files: [], folders: [] });
+  assert.deepEqual(db, { files: [], folders: [], streams: [] });
 });
 
 test('rejects oversized files and leaves no partial batch behind', async () => {

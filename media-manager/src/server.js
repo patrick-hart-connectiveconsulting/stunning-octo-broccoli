@@ -6,17 +6,12 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { Store } from './store.js';
+import { HttpError, send, readBody, readJson, paginate } from './http.js';
+import { createStreamsApi } from './streams.js';
 import { imageSize } from './image-size.js';
 import { mimeFromExt, fileCategory } from './mime.js';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '../..');
-
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
 
 const STORED_NAME = /^[a-f0-9]{32}(\.[a-z0-9]{1,10})?$/;
 // Types a browser could execute as active content if opened from our origin.
@@ -34,38 +29,6 @@ export async function createApp(options = {}) {
   const store = await new Store(join(config.dataDir, 'db.json')).load();
 
   // ---- helpers -------------------------------------------------------------
-
-  const send = (res, status, body) => {
-    const payload = body === undefined ? '' : JSON.stringify(body);
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(payload);
-  };
-
-  const readBody = (req, limit) =>
-    new Promise((ok, fail) => {
-      const declared = Number(req.headers['content-length'] || 0);
-      if (declared > limit) return fail(new HttpError(413, 'Payload too large'));
-      const chunks = [];
-      let size = 0;
-      req.on('data', (c) => {
-        size += c.length;
-        if (size > limit) {
-          fail(new HttpError(413, 'Payload too large'));
-          req.destroy();
-        } else chunks.push(c);
-      });
-      req.on('end', () => ok(Buffer.concat(chunks)));
-      req.on('error', fail);
-    });
-
-  const readJson = async (req) => {
-    const buf = await readBody(req, 1024 * 1024);
-    try {
-      return buf.length ? JSON.parse(buf.toString('utf8')) : {};
-    } catch {
-      throw new HttpError(400, 'Invalid JSON body');
-    }
-  };
 
   const readForm = async (req) => {
     const type = req.headers['content-type'] || '';
@@ -136,6 +99,8 @@ export async function createApp(options = {}) {
 
   const deleteBinary = (file) => unlink(join(uploadDir, file.hash + file.ext)).catch(() => {});
 
+  const streams = await createStreamsApi({ store, dataDir: config.dataDir, authorize });
+
   // ---- route handlers ------------------------------------------------------
 
   async function listFiles(req, res, url) {
@@ -143,9 +108,6 @@ export async function createApp(options = {}) {
     const type = url.searchParams.get('type');
     const folder = url.searchParams.get('folder');
     const [sortField, sortDir] = (url.searchParams.get('sort') || 'createdAt:desc').split(':');
-    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 24));
-
     let items = store.data.files;
     if (folder !== null) {
       const id = folder === '' || folder === 'root' ? null : folder;
@@ -166,12 +128,8 @@ export async function createApp(options = {}) {
       return cmp * dir;
     });
 
-    const total = items.length;
-    const data = items.slice((page - 1) * pageSize, page * pageSize).map(withFolder);
-    send(res, 200, {
-      data,
-      meta: { pagination: { page, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total } },
-    });
+    const result = paginate(items, url, { defaultSize: 24 });
+    send(res, 200, { ...result, data: result.data.map(withFolder) });
   }
 
   async function upload(req, res, url) {
@@ -416,6 +374,7 @@ export async function createApp(options = {}) {
       if (m === 'PUT' || m === 'PATCH') return updateFolder(req, res, id);
       if (m === 'DELETE') return deleteFolder(req, res, id);
     }
+    if ((pathname === '/api/streams' || pathname.startsWith('/api/streams/')) && (await streams.route(req, res, url))) return;
     if (pathname.startsWith('/api/')) throw new HttpError(404, 'Route not found');
     if ((match = pathname.match(/^\/uploads\/([^/]+)$/)) && (m === 'GET' || m === 'HEAD')) {
       return serveUpload(req, res, match[1]);
@@ -430,12 +389,18 @@ export async function createApp(options = {}) {
     } catch (err) {
       const status = err.status || 500;
       if (status === 500) console.error(err);
-      if (!res.headersSent) send(res, status, { error: { status, message: status === 500 ? 'Internal server error' : err.message } });
+      if (!res.headersSent) send(res, status, { error: { status, message: status === 500 ? 'Internal server error' : err.message, ...(err.details ? { details: err.details } : {}) } });
       else res.destroy();
     }
   });
 
-  return { server, store, config };
+  const close = () => {
+    streams.close();
+    server.close();
+    server.closeAllConnections?.();
+  };
+
+  return { server, store, config, close };
 }
 
 function formatBytes(n) {

@@ -20,10 +20,11 @@ For a full description of all functions and API endpoints, see [SPEC.md](SPEC.md
 7. [Do a manual test of the API](#7-do-a-manual-test-of-the-api)
 8. [Test the webhooks](#8-test-the-webhooks)
 9. [Test the standard formats](#9-test-the-standard-formats)
-10. [Remove the test data](#10-remove-the-test-data)
-11. [Configuration](#11-configuration)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Files and folders](#13-files-and-folders)
+10. [Test the components](#10-test-the-components)
+11. [Remove the test data](#11-remove-the-test-data)
+12. [Configuration](#12-configuration)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Files and folders](#14-files-and-folders)
 
 ---
 
@@ -34,7 +35,7 @@ For a full description of all functions and API endpoints, see [SPEC.md](SPEC.md
 | Node.js | Version 22 (LTS) is recommended. Version 20 is the minimum (see the note below). |
 | npm | The version that comes with Node.js |
 | Operating system | macOS, Linux or Windows |
-| Terminal | Sections 1–6, 9 and 10: any terminal (Terminal on macOS, a Linux shell, PowerShell or Command Prompt on Windows). Step 6.7 and sections 7–8: `bash` or `zsh`. On Windows, use Git Bash or WSL for these steps. |
+| Terminal | Sections 1–6 and 9–11: any terminal (Terminal on macOS, a Linux shell, PowerShell or Command Prompt on Windows). Step 6.7 and sections 7–8: `bash` or `zsh`. On Windows, use Git Bash or WSL for these steps. |
 | Browser | A current version of Chrome, Edge, Firefox or Safari |
 | `curl` | Necessary for sections 7 and 8 only. macOS, Linux, Git Bash and Windows 10 or later include `curl`. |
 
@@ -184,8 +185,8 @@ npm test
 The tests take approximately 3 seconds. Make sure that the last lines show `fail 0`:
 
 ```
-# tests 34
-# pass 34
+# tests 41
+# pass 41
 # fail 0
 ```
 
@@ -202,6 +203,7 @@ node --test test/streams.test.js
 | `test/content.test.js` | Templates, draft and publish, field types, unique values, retention, webhooks |
 | `test/relations-keys-schedule.test.js` | Relations, API keys, scheduled publish and unpublish |
 | `test/formats-geo-cors.test.js` | CORS, map pins, dates, media in `populate`, calendar, RSS, JSON, GeoJSON and CSV formats |
+| `test/ui-core.test.js` | The component library helpers: safe Markdown, field roles, calendar dates, JSON-LD |
 
 > **CAUTION:** Do not use `--test-name-pattern` to do only one test in a file. The tests in a file use the data from the tests before them. A single test can fail when it starts without that data. Always do a full file.
 
@@ -210,7 +212,7 @@ node --test test/streams.test.js
 1. Find the lines that start with `not ok`. They give the name of the test that failed.
 2. Read the `expected` and `actual` values below that line.
 3. Do the tests of that file again (step 5.2).
-4. If the test fails again, do the checks in [section 12](#12-troubleshooting).
+4. If the test fails again, do the checks in [section 13](#13-troubleshooting).
 
 ---
 
@@ -469,7 +471,84 @@ To test a calendar feed and map pins:
 
 ---
 
-## 10. Remove the test data
+## 10. Test the components
+
+The component library shows streams on a website as HTML (lists, cards, calendar, map and more). For the full reference, see [UI.md](UI.md).
+
+### 10.1 Make the demo data
+
+1. Start the server with a token (step 3.1).
+2. In a second terminal, go to the `media-manager` folder.
+3. Enter this command:
+
+   ```bash
+   npm run seed:demo
+   ```
+
+4. Make sure that the terminal shows `Created demo-events` and six more `Created` lines.
+
+The command makes seven demo streams. The events have dates near today, so the calendar always shows events. If you use a different token or port, add the options: `npm run seed:demo -- --token=my-token --url=http://localhost:4100`.
+
+> **NOTE:** If you enter the command again, it does not make duplicates. To make the demo streams again, add `--reset`: `npm run seed:demo -- --reset`.
+
+### 10.2 Examine the demo page
+
+1. Open <http://localhost:1338/ui/demo.html>.
+2. Make sure that each section shows content. No section shows a red message.
+3. In **Calendar**, click **›**. The next month shows. Click **Agenda**. The events show as a list.
+4. In **Tag filter**, click a tag. The list below shows only the posts with that tag.
+5. In **Table**, click the **TITLE** heading. The rows are sorted. Type `pizza` in the search box. One row stays.
+6. In **Gallery**, click an image. A large image shows. Push the right arrow key. The next image shows. Push **Esc**.
+7. Under an example, click **Show code**. Copy the code to use it on your website.
+
+> **NOTE:** The map needs an internet connection for the map images (tiles). Without a connection, the pins show on a grey background.
+
+### 10.3 Test the components on a different website
+
+A website on a different address can use the components only if the server allows that address.
+
+1. Stop the server (step 3.4).
+2. Start the server again. Add the address of your website, for example a local development server on port 5173:
+
+   ```bash
+   npm start -- --token=dev-token --cors=http://localhost:5173
+   ```
+
+3. Add these lines to a page of your website:
+
+   ```html
+   <script type="module" src="http://localhost:1338/ui/streams-ui.js"></script>
+   <stream-calendar src="http://localhost:1338/api/streams/demo-events"></stream-calendar>
+   ```
+
+4. Open the page. Make sure that the calendar shows the demo events.
+
+If the server does not allow the website, the component shows a red message. The message gives the `--cors=` value to use.
+
+### 10.4 Do the browser tests (optional)
+
+The browser tests examine all components in Chromium. They need Playwright, which is not part of Media Manager.
+
+1. Install Playwright one time:
+
+   ```bash
+   npm install --no-save playwright
+   npx playwright install chromium
+   ```
+
+2. Do the tests:
+
+   ```bash
+   npm run test:browser
+   ```
+
+3. Make sure that the last lines show `pass 10` and `fail 0`.
+
+The tests start their own server with a temporary data folder. They do not use your data.
+
+---
+
+## 11. Remove the test data
 
 All data is in the `data/` folder:
 
@@ -495,7 +574,7 @@ Git ignores this folder.
 
 ---
 
-## 11. Configuration
+## 12. Configuration
 
 You can set these values as environment variables (see the table in step 3.1). For `token`, `port` and `host`, you can also use an option after `npm start --`. An option has priority over the environment variable.
 
@@ -526,10 +605,12 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Problem | Cause | Action |
 | --- | --- | --- |
+| A component shows `Cannot load from http://localhost:1338` | The server does not allow the website, or the server does not operate. | Start the server with the `--cors=` value from the message (section 10.3). |
+| `npm run test:browser` shows `Playwright is not installed` | Playwright is not installed. | Do step 10.4, step 1. |
 | A website on a different address gets `blocked by CORS policy` in the browser console | The server does not allow that website. | Start the server with the address of the website: `npm start -- --token=dev-token --cors=http://localhost:5173`. |
 | PowerShell shows `The term 'MEDIA_API_TOKEN=dev-token' is not recognized`, or Command Prompt shows `'MEDIA_API_TOKEN' is not recognized as an internal or external command` | The `NAME=value command` form operates in `bash` and `zsh` only. | Use `npm run start:local` (step 3.1). Or use the command for your terminal from the table in step 3.1. |
 | The terminal shows `Could not read package.json` | The terminal is not in the `media-manager` folder. | Go to the folder: `cd stunning-octo-broccoli/media-manager`. Then enter the command again. |
@@ -546,7 +627,7 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 ---
 
-## 13. Files and folders
+## 14. Files and folders
 
 ```
 media-manager/
@@ -566,6 +647,11 @@ media-manager/
 │   ├── image-size.js    Reads the dimensions of images
 │   └── mime.js          File types
 ├── public/              The admin pages (HTML, CSS and JavaScript, no build step)
+│   └── ui/              The component library (streams-ui.js), the demo page and Leaflet
+├── scripts/
+│   └── seed-demo.js     Makes the demo streams (npm run seed:demo)
+├── UI.md                The reference for the components
 ├── test/                The automated tests (node:test)
+│   └── browser/         The optional browser tests (npm run test:browser)
 └── data/                Your local data. The server makes this folder. Git ignores it.
 ```

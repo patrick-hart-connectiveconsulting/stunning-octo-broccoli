@@ -1,9 +1,19 @@
-// Stream datasets: field definitions and validation of event data against them.
+// Stream datasets: field definitions and validation of item data against them.
 
-export const FIELD_TYPES = ['string', 'text', 'integer', 'number', 'boolean', 'datetime', 'enum', 'json', 'media'];
+export const FIELD_TYPES = [
+  'string', 'text', 'richtext', 'uid', 'email', 'url',
+  'integer', 'number', 'boolean', 'datetime', 'enum', 'tags', 'json', 'media',
+];
 
+export const UID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_FIELDS = 100;
+const MAX_TAGS = 100;
+const MAX_TAG_LENGTH = 64;
+
+const DEFAULT_MAX_LENGTH = { string: 255, text: 100000, richtext: 1000000, uid: 255 };
+const UNIQUE_CAPABLE = new Set(['string', 'email', 'url', 'integer', 'number', 'uid']);
 
 /**
  * Normalises a stream's field list. Returns { fields } on success or
@@ -43,10 +53,10 @@ export function normalizeFields(input) {
       field.options = options;
     }
 
-    if (raw.type === 'string' || raw.type === 'text') {
-      const fallback = raw.type === 'string' ? 255 : 100000;
-      const max = raw.maxLength ?? fallback;
-      if (!Number.isInteger(max) || max < 1 || max > 1000000) err('maxLength must be an integer between 1 and 1000000');
+    if (raw.type in DEFAULT_MAX_LENGTH) {
+      const max = raw.maxLength ?? DEFAULT_MAX_LENGTH[raw.type];
+      const ceiling = raw.type === 'uid' ? 255 : 10000000;
+      if (!Number.isInteger(max) || max < 1 || max > ceiling) err(`maxLength must be an integer between 1 and ${ceiling}`);
       field.maxLength = max;
     }
 
@@ -58,18 +68,39 @@ export function normalizeFields(input) {
       }
       if (field.min !== undefined && field.max !== undefined && field.min > field.max) err('min cannot be greater than max');
     }
+
+    if (raw.type === 'uid') {
+      if (raw.targetField !== undefined && raw.targetField !== null && raw.targetField !== '') field.targetField = String(raw.targetField);
+    }
+
+    if (raw.unique === true) {
+      if (UNIQUE_CAPABLE.has(raw.type)) field.unique = true;
+      else if (raw.type !== undefined) err(`unique is not supported on ${raw.type} fields`);
+    }
     return field;
+  });
+
+  // Cross-field checks
+  fields.forEach((f, i) => {
+    if (f?.type !== 'uid' || !f.targetField) return;
+    const target = fields.find((t) => t?.name === f.targetField);
+    if (!target || !['string', 'text'].includes(target.type)) {
+      errors.push({ path: `fields[${i}].targetField`, message: 'must name a string or text field of this stream' });
+    }
   });
 
   return errors.length ? { errors } : { fields };
 }
 
+export const isEmptyValue = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
+
 /**
- * Validates and normalises an event's data object against the stream fields.
- * Streams without fields accept any JSON object.
+ * Validates and normalises an item's data object against the stream fields.
+ * Streams without fields accept any JSON object. With `enforceRequired: false`
+ * (drafts) required fields may be empty.
  * Returns { data } or { errors: [{ path, message }] }.
  */
-export function validateData(fields, data, { mediaExists = () => true } = {}) {
+export function validateData(fields, data, { mediaExists = () => true, enforceRequired = true } = {}) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { errors: [{ path: 'data', message: 'data must be a JSON object' }] };
   }
@@ -85,9 +116,9 @@ export function validateData(fields, data, { mediaExists = () => true } = {}) {
   for (const field of fields) {
     const path = `data.${field.name}`;
     const value = data[field.name];
-    if (value === undefined || value === null || value === '') {
-      if (field.required) errors.push({ path, message: 'is required' });
-      out[field.name] = null;
+    if (isEmptyValue(value)) {
+      if (field.required && enforceRequired) errors.push({ path, message: 'is required' });
+      out[field.name] = field.type === 'tags' ? [] : null;
       continue;
     }
     const result = coerce(field, value, mediaExists);
@@ -98,12 +129,29 @@ export function validateData(fields, data, { mediaExists = () => true } = {}) {
 }
 
 function coerce(field, value, mediaExists) {
+  const lengthCheck = (v) => (v.length > field.maxLength ? { error: `must be at most ${field.maxLength} characters` } : { value: v });
   switch (field.type) {
     case 'string':
     case 'text':
+    case 'richtext':
       if (typeof value !== 'string') return { error: 'must be a string' };
-      if (value.length > field.maxLength) return { error: `must be at most ${field.maxLength} characters` };
-      return { value };
+      return lengthCheck(value);
+    case 'uid':
+      if (typeof value !== 'string' || !UID_PATTERN.test(value)) return { error: 'must be lowercase letters, digits and single hyphens (e.g. my-first-post)' };
+      return lengthCheck(value);
+    case 'email':
+      if (typeof value !== 'string' || value.length > 254 || !EMAIL.test(value)) return { error: 'must be an email address' };
+      return { value: value.trim() };
+    case 'url': {
+      if (typeof value !== 'string' || value.length > 2000) return { error: 'must be an http(s) URL' };
+      try {
+        const u = new URL(value);
+        if (!['http:', 'https:'].includes(u.protocol)) throw new Error();
+        return { value };
+      } catch {
+        return { error: 'must be an http(s) URL' };
+      }
+    }
     case 'integer':
     case 'number': {
       if (typeof value !== 'number' || !Number.isFinite(value)) return { error: 'must be a number' };
@@ -121,6 +169,13 @@ function coerce(field, value, mediaExists) {
     }
     case 'enum':
       return field.options.includes(value) ? { value } : { error: `must be one of: ${field.options.join(', ')}` };
+    case 'tags': {
+      if (!Array.isArray(value) || value.some((t) => typeof t !== 'string')) return { error: 'must be an array of strings' };
+      const tags = [...new Set(value.map((t) => t.trim()).filter(Boolean))];
+      if (tags.length > MAX_TAGS) return { error: `at most ${MAX_TAGS} tags` };
+      if (tags.some((t) => t.length > MAX_TAG_LENGTH)) return { error: `each tag must be at most ${MAX_TAG_LENGTH} characters` };
+      return { value: tags };
+    }
     case 'json':
       return { value };
     case 'media':
@@ -141,4 +196,30 @@ export function parseFilterValue(type, raw, sample) {
     return Number.isNaN(d.getTime()) ? raw : d.toISOString();
   }
   return raw;
+}
+
+/** JSON Schema (2020-12) fragment for one field. */
+export function fieldJsonSchema(f) {
+  const base = {
+    string: { type: 'string' },
+    text: { type: 'string' },
+    richtext: { type: 'string', contentMediaType: 'text/markdown' },
+    uid: { type: 'string', pattern: UID_PATTERN.source },
+    email: { type: 'string', format: 'email' },
+    url: { type: 'string', format: 'uri' },
+    integer: { type: 'integer' },
+    number: { type: 'number' },
+    boolean: { type: 'boolean' },
+    datetime: { type: 'string', format: 'date-time' },
+    enum: { type: 'string', enum: f.options },
+    tags: { type: 'array', items: { type: 'string', maxLength: MAX_TAG_LENGTH }, uniqueItems: true, maxItems: MAX_TAGS },
+    json: {},
+    media: { type: 'string', format: 'uuid', description: 'Media file id' },
+  }[f.type];
+  const schema = { ...base };
+  if (f.maxLength && f.type !== 'enum') schema.maxLength = f.maxLength;
+  if (f.min !== undefined) schema.minimum = f.min;
+  if (f.max !== undefined) schema.maximum = f.max;
+  if (f.description) schema.description = [f.description, schema.description].filter(Boolean).join(' — ');
+  return schema;
 }

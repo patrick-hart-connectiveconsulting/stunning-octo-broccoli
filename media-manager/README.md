@@ -3,29 +3,30 @@
 A lightweight, self-hosted alternative to Strapi. It needs only Node.js 20+ and has no `npm install` step or build step. It has two modules:
 
 - **Media Library**: upload, organize and serve files.
-- **Streams**: create event endpoints in the admin UI, define the dataset (typed fields) each one accepts, then post, fetch, filter and subscribe to events over a REST API.
+- **Streams**: data streams of anything (events, blog posts, social posts, products…). Pick a template or design the dataset yourself, then post, fetch, filter and subscribe to items over a REST API. Streams also support draft & publish, unique slugs, retention limits and signed webhooks.
 
 **Full specification: [SPEC.md](SPEC.md)**
 
 ## Streams in 30 seconds
 
 ```bash
-# create a stream with a dataset
+# create a blog from a template (fields, draft & publish and labels come pre-set)
 curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Order events","fields":[{"name":"orderId","type":"string","required":true},{"name":"total","type":"number"}]}' \
+  -d '{"name":"Blog","template":"blog-posts"}' \
   http://localhost:1338/api/streams
 
-# post an event to it
+# post an item to it (the slug is generated from the title) and publish it
 curl -X POST -H "Authorization: Bearer $MEDIA_API_TOKEN" -H "Content-Type: application/json" \
-  -d '{"data":{"orderId":"A-100","total":42.5}}' \
-  http://localhost:1338/api/streams/order-events
+  -d '{"data":{"title":"Hello World","body":"# Hi","tags":["news"]},"publish":true}' \
+  http://localhost:1338/api/streams/blog
 
 # fetch, filter, subscribe
-curl -g "http://localhost:1338/api/streams/order-events/events?filter[total][gte]=10&sort=timestamp:desc"
-curl -N  "http://localhost:1338/api/streams/order-events/subscribe"
+curl -g "http://localhost:1338/api/streams/blog/items?filter[tags]=news&sort=timestamp:desc"
+curl -g "http://localhost:1338/api/streams/blog/items?filter[slug]=hello-world"
+curl -N  "http://localhost:1338/api/streams/blog/subscribe"
 ```
 
-The admin page for streams is at `/streams.html`. It has a field builder, an events table with live updates, and per-stream API docs with copy-paste examples.
+The admin page for streams is at `/streams.html`. It has a template picker, a field builder, a live items table with publishing, settings for retention and webhooks, and per-stream API docs with copy-paste examples.
 
 ## Media Library
 
@@ -44,7 +45,7 @@ npm test                                # API test suites (node:test)
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `PORT` / `HOST` | `1338` / `0.0.0.0` | Listen address |
-| `MEDIA_API_TOKEN` | *(unset)* | Bearer token required for every write. **If unset, writes are open**, so set it anywhere other than your own machine. |
+| `MEDIA_API_TOKEN` | *(unset)* | Bearer token required for every write and for reading drafts. **If unset, everything is open**, so set it anywhere other than your own machine. |
 | `MEDIA_DATA_DIR` | `./data` | Where `db.json`, `uploads/` and `events/` live |
 | `MEDIA_MAX_FILE_SIZE` | `52428800` (50 MB) | Per-file upload limit in bytes |
 

@@ -66,7 +66,7 @@ test('stream CRUD and validation', async () => {
   const created = await call('/api/streams', { method: 'POST', json: { name: 'Order Events', description: 'Shop orders', fields: ORDER_FIELDS } });
   assert.equal(created.status, 201);
   assert.equal(created.data.slug, 'order-events');
-  assert.equal(created.data.eventCount, 0);
+  assert.equal(created.data.itemCount, 0);
   assert.equal(created.data.fields[0].maxLength, 255);
 
   assert.equal((await call('/api/streams', { method: 'POST', json: { name: 'Order events' } })).status, 409);
@@ -168,8 +168,8 @@ test('event CRUD, validation, filtering, sorting and pagination', async () => {
 
   assert.equal((await call(`${s}/events/${id}`, { method: 'DELETE' })).status, 200);
   assert.equal((await call(`${s}/events/${id}`)).status, 404);
-  assert.equal((await call(s)).data.eventCount, 3);
-  assert.equal((await call(s)).data.lastEventAt, '2026-04-01T00:00:00.000Z');
+  assert.equal((await call(s)).data.itemCount, 3);
+  assert.equal((await call(s)).data.lastItemAt, '2026-04-01T00:00:00.000Z');
 });
 
 test('schema-less streams accept any object and media fields check references', async () => {
@@ -212,6 +212,16 @@ test('live subscription delivers created/updated/deleted and replays missed even
   assert.deepEqual(frames.map((f) => /event: (\S+)/.exec(f)[1]), ['created', 'created', 'updated', 'deleted']);
   assert.equal(JSON.parse(/data: (.*)/.exec(frames[2])[1]).data.n, 3);
   controller.abort();
+
+  // Without ?after or Last-Event-ID nothing is replayed — only new changes arrive.
+  const fresh = await fetch(`${base}/api/streams/raw/subscribe`);
+  const r2 = fresh.body.getReader();
+  let buf2 = '';
+  await call('/api/streams/raw/events', { method: 'POST', json: { data: { n: 4 } } });
+  while (!/event: created/.test(buf2)) buf2 += decoder.decode((await r2.read()).value);
+  assert.equal((buf2.match(/event: created/g) || []).length, 1);
+  assert.match(buf2, /"n":4/);
+  await r2.cancel();
 });
 
 test('events persist across restarts and deleting a stream removes its log', async () => {

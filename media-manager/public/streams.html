@@ -27,7 +27,7 @@
         </a>
       </nav>
       <div class="sidebar-footer">
-        <button class="btn btn-ghost btn-sm" id="tokenBtn" hidden>
+        <button class="btn btn-ghost btn-sm" id="tokenBtn" title="API token" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 12l9-9M17 6l3 3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
           <span id="tokenLabel">Set API token</span>
         </button>
@@ -67,18 +67,24 @@
           </header>
 
           <div class="tabs" role="tablist">
-            <button role="tab" data-tab="events" aria-selected="true">Events</button>
+            <button role="tab" data-tab="items" aria-selected="true" id="itemsTab">Items</button>
             <button role="tab" data-tab="dataset">Dataset</button>
+            <button role="tab" data-tab="settings">Settings</button>
             <button role="tab" data-tab="api">API</button>
           </div>
 
-          <!-- Events -->
-          <div class="tab-panel" data-panel="events">
+          <!-- Items -->
+          <div class="tab-panel" data-panel="items">
             <div class="toolbar">
               <button class="btn btn-primary btn-sm" id="newEventBtn">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2"/></svg>
-                New event
+                <span id="newItemLabel">New item</span>
               </button>
+              <select id="statusFilter" aria-label="Status" hidden>
+                <option value="all">All</option>
+                <option value="published">Published</option>
+                <option value="draft">Drafts</option>
+              </select>
               <form class="filter" id="filterForm">
                 <select id="filterField" aria-label="Filter field"></select>
                 <select id="filterOp" aria-label="Filter operator">
@@ -107,7 +113,7 @@
               </table>
             </div>
             <div class="empty" id="eventsEmpty" hidden>
-              <p id="eventsEmptyText">No events yet.</p>
+              <p id="eventsEmptyText">Nothing here yet.</p>
             </div>
             <footer class="pagination" id="eventsPagination"></footer>
           </div>
@@ -122,17 +128,54 @@
               <label>Description<input name="description" maxlength="1000"></label>
               <div>
                 <h3 class="section-title">Fields</h3>
-                <p class="hint small" style="margin-top:-6px">Leave empty to accept any JSON object. Changing fields affects new and edited events only; existing events keep their stored data.</p>
+                <p class="hint small" style="margin-top:-6px">Leave empty to accept any JSON object. Changing fields affects new and edited items only; existing items keep their stored data.</p>
                 <div id="datasetFields"></div>
               </div>
               <div class="form-actions">
                 <button class="btn btn-primary" type="submit">Save dataset</button>
               </div>
             </form>
+          </div>
+
+          <!-- Settings -->
+          <div class="tab-panel" data-panel="settings" hidden>
+            <form id="settingsForm" class="fields">
+              <div>
+                <h3 class="section-title">What this stream holds</h3>
+                <div class="row-2">
+                  <label>Singular label<input name="singular" required maxlength="40" placeholder="post"></label>
+                  <label>Plural label<input name="plural" required maxlength="40" placeholder="posts"></label>
+                </div>
+                <span class="hint small">Used throughout the admin UI, e.g. “New post”, “12 posts”.</span>
+              </div>
+              <div>
+                <h3 class="section-title">Publishing</h3>
+                <label class="check-row"><input type="checkbox" name="draftAndPublish">
+                  <span><strong>Draft &amp; publish</strong><br><span class="hint">New items start as drafts. Anonymous API readers only see published items, and required fields are enforced when publishing.</span></span>
+                </label>
+              </div>
+              <div>
+                <h3 class="section-title">Retention</h3>
+                <div class="row-2">
+                  <label>Keep at most (items)<input name="maxItems" type="number" min="1" step="1" placeholder="Unlimited"></label>
+                  <label>Delete items older than (days)<input name="maxAgeDays" type="number" min="0.01" step="any" placeholder="Never"></label>
+                </div>
+                <span class="hint small">Applies to every item by its timestamp, oldest first. Useful for event logs; leave blank for content.</span>
+              </div>
+              <div>
+                <h3 class="section-title">Webhooks</h3>
+                <p class="hint small" style="margin-top:-6px">POST each change to another system. Requests are signed — see the API tab for how to verify them.</p>
+                <div id="webhookList" class="webhook-list"></div>
+                <button type="button" class="btn btn-secondary btn-sm" id="addWebhook">+ Add webhook</button>
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-primary" type="submit">Save settings</button>
+              </div>
+            </form>
             <div class="danger-zone">
               <div>
                 <strong>Delete this stream</strong>
-                <p class="muted small">Removes the endpoint and permanently deletes all of its events.</p>
+                <p class="muted small">Removes the endpoint and permanently deletes all of its items.</p>
               </div>
               <button class="btn btn-danger" id="deleteStream">Delete stream</button>
             </div>
@@ -146,7 +189,7 @@
 
         <section class="empty stream-empty" id="noStreams" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          <p>Create a stream to get an endpoint you can post events to.</p>
+          <p>Create a stream for your events, posts, products — any data you want to post and fetch over an API.</p>
           <button class="btn btn-primary" id="emptyNewStream">Create new stream</button>
         </section>
       </div>
@@ -161,6 +204,10 @@
         <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
       </header>
       <div class="modal-body fields">
+        <div>
+          <h3 class="section-title">Start from</h3>
+          <div class="template-grid" id="templatePicker" role="radiogroup" aria-label="Template"></div>
+        </div>
         <div class="row-2">
           <label>Display name<input name="name" required maxlength="100" autocomplete="off" placeholder="Order events"></label>
           <label>Slug<input name="slug" maxlength="64" pattern="[a-z0-9](?:[a-z0-9\-]{0,62}[a-z0-9])?" placeholder="order-events"><span class="hint" id="slugHint">POST /api/streams/…</span></label>
@@ -168,7 +215,7 @@
         <label>Description<input name="description" maxlength="1000"></label>
         <div>
           <h3 class="section-title">Fields</h3>
-          <p class="hint small" style="margin-top:-6px">Define the dataset each event must match, or leave empty to accept any JSON object.</p>
+          <p class="hint small" style="margin-top:-6px">Define the dataset each item must match, or leave empty to accept any JSON object.</p>
           <div id="newStreamFields"></div>
         </div>
       </div>
@@ -183,19 +230,22 @@
   <dialog id="eventDialog" class="modal modal-wide">
     <form class="modal-inner" id="eventForm" novalidate>
       <header class="modal-header">
-        <h2 id="eventDialogTitle">New event</h2>
+        <h2 id="eventDialogTitle">New item</h2>
         <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
       </header>
       <div class="modal-body fields">
         <dl class="meta" id="eventMeta" hidden></dl>
-        <label>Timestamp<input type="datetime-local" step="1" name="timestamp"><span class="hint">When the event happened. Leave blank to use the current time.</span></label>
+        <label>Timestamp<input type="datetime-local" step="1" name="timestamp"><span class="hint" id="timestampHint">When it happened. Leave blank to use the current time.</span></label>
         <div id="eventFields" class="fields"></div>
       </div>
       <footer class="modal-footer">
-        <button class="btn btn-danger" type="button" id="deleteEvent" hidden>Delete event</button>
+        <button class="btn btn-danger" type="button" id="deleteEvent" hidden>Delete</button>
         <span class="spacer"></span>
+        <span class="status-pill" id="itemStatus" hidden></span>
         <button class="btn btn-secondary" type="button" data-close>Cancel</button>
-        <button class="btn btn-primary" type="submit" id="saveEvent">Create event</button>
+        <button class="btn btn-secondary" type="button" id="unpublishEvent" hidden>Unpublish</button>
+        <button class="btn btn-secondary" type="submit" id="saveEvent">Save</button>
+        <button class="btn btn-primary" type="submit" id="publishEvent" hidden>Publish</button>
       </footer>
     </form>
   </dialog>

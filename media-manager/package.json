@@ -1,8 +1,8 @@
 {
   "name": "media-manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "A lightweight, dependency-free media library and event streams API inspired by Strapi",
+  "description": "A lightweight, dependency-free media library and data streams API (events, posts, products…) inspired by Strapi",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

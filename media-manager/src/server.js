@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { Store } from './store.js';
 import { HttpError, send, readBody, readJson, paginate } from './http.js';
 import { createStreamsApi } from './streams.js';
+import { TEMPLATES } from './templates.js';
 import { imageSize } from './image-size.js';
 import { mimeFromExt, fileCategory } from './mime.js';
 
@@ -43,15 +44,23 @@ export async function createApp(options = {}) {
     }
   };
 
-  const authorize = (req) => {
-    if (!config.token) return;
-    const header = req.headers.authorization || '';
-    const given = Buffer.from(header.startsWith('Bearer ') ? header.slice(7) : '');
-    const expected = Buffer.from(config.token);
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
-      throw new HttpError(401, 'Missing or invalid API token');
-    }
+  const tokenMatches = (given) => {
+    const a = Buffer.from(given || '');
+    const b = Buffer.from(config.token);
+    return a.length === b.length && timingSafeEqual(a, b);
   };
+  const bearer = (req) => {
+    const header = req.headers.authorization || '';
+    return header.startsWith('Bearer ') ? header.slice(7) : '';
+  };
+
+  const authorize = (req) => {
+    if (config.token && !tokenMatches(bearer(req))) throw new HttpError(401, 'Missing or invalid API token');
+  };
+
+  /** Non-throwing check. `url` enables `?access_token=` (for EventSource, which can't send headers). */
+  const isAuthorized = (req, url) =>
+    !config.token || tokenMatches(bearer(req)) || Boolean(url && tokenMatches(url.searchParams.get('access_token')));
 
   const cleanText = (value, field, { max = 1000, required = false } = {}) => {
     if (value === undefined) return undefined;
@@ -99,7 +108,7 @@ export async function createApp(options = {}) {
 
   const deleteBinary = (file) => unlink(join(uploadDir, file.hash + file.ext)).catch(() => {});
 
-  const streams = await createStreamsApi({ store, dataDir: config.dataDir, authorize });
+  const streams = await createStreamsApi({ store, dataDir: config.dataDir, authorize, isAuthorized, webhookOptions: options.webhookOptions });
 
   // ---- route handlers ------------------------------------------------------
 
@@ -348,6 +357,7 @@ export async function createApp(options = {}) {
     if (pathname === '/api/config' && m === 'GET') {
       return send(res, 200, { authRequired: Boolean(config.token), maxFileSize: config.maxFileSize });
     }
+    if (pathname === '/api/stream-templates' && m === 'GET') return send(res, 200, { data: TEMPLATES });
     if (pathname === '/api/upload' && m === 'POST') return upload(req, res, url);
     if (pathname === '/api/upload/files' && m === 'GET') return listFiles(req, res, url);
     if ((match = pathname.match(/^\/api\/upload\/files\/([\w-]+)$/))) {

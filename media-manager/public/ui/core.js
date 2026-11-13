@@ -6,9 +6,14 @@
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 
-/** Allows http(s), mailto, tel and relative URLs; everything else (javascript:, data:…) becomes "#". */
+/**
+ * Allows http(s), mailto, tel and relative URLs; everything else (javascript:,
+ * data:…) becomes "#". Browsers ignore tabs, line breaks and leading control
+ * characters in URLs ("java\tscript:" runs as "javascript:"), so they are
+ * removed before the scheme is checked, and the cleaned URL is returned.
+ */
 export function safeUrl(url, { image = false } = {}) {
-  const u = String(url ?? '').trim();
+  const u = String(url ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
   if (!u) return '#';
   if (/^(https?:)?\/\//i.test(u) || /^[/.#?]/.test(u)) return u;
   if (!image && /^(mailto|tel):/i.test(u)) return u;

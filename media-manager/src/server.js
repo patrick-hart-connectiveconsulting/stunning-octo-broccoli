@@ -1,12 +1,13 @@
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream';
 import { stat, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { join, resolve, extname, sep } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { Store } from './store.js';
-import { HttpError, send, readBody, readJson, paginate } from './http.js';
+import { HttpError, send, readBody, readJsonObject, paginate } from './http.js';
 import { createStreamsApi } from './streams.js';
 import { TEMPLATES } from './templates.js';
 import { imageSize } from './image-size.js';
@@ -28,9 +29,13 @@ export async function createApp(options = {}) {
     corsOrigins: parseOrigins(options.cors ?? process.env.MEDIA_CORS_ORIGINS ?? ''),
     // Public base URL for absolute links in feeds, e.g. https://cms.example.com (else taken from the Host header).
     publicUrl: options.publicUrl ?? process.env.MEDIA_PUBLIC_URL ?? null,
+    // Webhooks to loopback / private network addresses are blocked unless this is set (local testing).
+    allowPrivateWebhooks: options.allowPrivateWebhooks ?? /^(1|true|yes)$/i.test(process.env.MEDIA_WEBHOOKS_ALLOW_PRIVATE || ''),
   };
   const uploadDir = join(config.dataDir, 'uploads');
-  await mkdir(uploadDir, { recursive: true });
+  // The data folder holds webhook secrets and key hashes: owner-only access.
+  await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
+  await mkdir(uploadDir, { recursive: true, mode: 0o700 });
   const store = await new Store(join(config.dataDir, 'db.json')).load();
 
   // ---- helpers -------------------------------------------------------------
@@ -117,7 +122,9 @@ export async function createApp(options = {}) {
     dataDir: config.dataDir,
     isMaster: isAuthorized,
     bearer,
-    webhookOptions: options.webhookOptions,
+    webhookOptions: { allowPrivate: config.allowPrivateWebhooks, ...options.webhookOptions },
+    maxSubscribers: options.maxSubscribers,
+    maxReplay: options.maxReplay,
     schedulerIntervalMs: options.schedulerIntervalMs,
     publicUrl: config.publicUrl,
   });
@@ -207,7 +214,7 @@ export async function createApp(options = {}) {
   async function updateFile(req, res, id) {
     authorize(req);
     if (!store.getFile(id)) throw new HttpError(404, 'File not found');
-    const body = await readJson(req);
+    const body = await readJsonObject(req);
     const patch = {};
     const name = cleanText(body.name, 'name', { max: 255, required: true });
     if (name !== undefined) patch.name = name;
@@ -257,7 +264,7 @@ export async function createApp(options = {}) {
 
   async function createFolder(req, res) {
     authorize(req);
-    const body = await readJson(req);
+    const body = await readJsonObject(req);
     const name = cleanText(body.name, 'name', { max: 100, required: true });
     if (name === undefined) throw new HttpError(400, 'name is required');
     const parent = folderRef(body.parent) ?? null;
@@ -269,7 +276,7 @@ export async function createApp(options = {}) {
     authorize(req);
     const folder = store.getFolder(id);
     if (!folder) throw new HttpError(404, 'Folder not found');
-    const body = await readJson(req);
+    const body = await readJsonObject(req);
     const patch = {};
     const parent = folderRef(body.parent);
     if (parent !== undefined) {
@@ -326,11 +333,22 @@ export async function createApp(options = {}) {
       }
       res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${info.size}`, 'Content-Length': end - start + 1 });
       if (req.method === 'HEAD') return res.end();
-      return createReadStream(absPath, { start, end }).pipe(res);
+      return stream(createReadStream(absPath, { start, end }), res);
     }
     res.writeHead(200, { ...headers, 'Content-Length': info.size });
     if (req.method === 'HEAD') return res.end();
-    createReadStream(absPath).pipe(res);
+    stream(createReadStream(absPath), res);
+  }
+
+  /**
+   * Streams a file to the response. pipeline() closes the file when the client
+   * disconnects (pipe() would leak the descriptor) and handles read errors
+   * (pipe() would let them crash the process).
+   */
+  function stream(source, res) {
+    pipeline(source, res, (err) => {
+      if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.error('download failed:', err.message);
+    });
   }
 
   async function serveUpload(req, res, name) {
@@ -339,8 +357,7 @@ export async function createApp(options = {}) {
     const download = new URL(req.url, 'http://x').searchParams.has('download');
     if (download) {
       const file = store.data.files.find((f) => f.hash + f.ext === name);
-      const fname = (file?.name || name).replace(/["\\\r\n]/g, '_');
-      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+      res.setHeader('Content-Disposition', contentDisposition(file?.name || name));
     }
     await serveFile(req, res, join(uploadDir, name), {
       mime,
@@ -350,7 +367,12 @@ export async function createApp(options = {}) {
   }
 
   async function servePublic(req, res, pathname) {
-    const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+    let rel;
+    try {
+      rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+    } catch {
+      throw new HttpError(400, 'Malformed URL');
+    }
     const abs = resolve(config.publicDir, rel);
     if (!abs.startsWith(resolve(config.publicDir) + sep)) throw new HttpError(404, 'Not found');
     const mime = mimeFromExt(extname(abs)) + (/\.(html|css|js)$/.test(abs) ? '; charset=utf-8' : '');
@@ -473,6 +495,16 @@ export function parseOrigins(value) {
   return list;
 }
 
+/**
+ * attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded>
+ * (RFC 6266). Header values can't carry characters above U+00FF.
+ */
+export function contentDisposition(name) {
+  const ascii = String(name).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  const encoded = encodeURIComponent(String(name)).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB'];
@@ -486,20 +518,22 @@ function formatBytes(n) {
 // take precedence over the matching environment variables.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const OPTIONS = { token: 'MEDIA_API_TOKEN', port: 'PORT', host: 'HOST', cors: 'MEDIA_CORS_ORIGINS', 'public-url': 'MEDIA_PUBLIC_URL' };
+  const FLAGS = { 'allow-private-webhooks': 'MEDIA_WEBHOOKS_ALLOW_PRIVATE' };
   const args = {};
   for (const arg of process.argv.slice(2)) {
-    const m = /^--([a-z-]+)=(.*)$/.exec(arg);
-    if (!m || !(m[1] in OPTIONS)) {
-      console.error(`Unknown option "${arg}". Supported: ${Object.keys(OPTIONS).map((k) => `--${k}=…`).join(', ')}`);
+    const m = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
+    const ok = m && ((m[1] in OPTIONS && m[2] !== undefined) || (m[1] in FLAGS && m[2] === undefined));
+    if (!ok) {
+      console.error(`Unknown option "${arg}". Supported: ${[...Object.keys(OPTIONS).map((k) => `--${k}=…`), ...Object.keys(FLAGS).map((k) => `--${k}`)].join(', ')}`);
       process.exit(1);
     }
-    args[m[1]] = m[2];
+    args[m[1]] = m[2] ?? true;
   }
   const port = Number(args.port || process.env.PORT || 1338);
   const host = args.host || process.env.HOST || '0.0.0.0';
   let app;
   try {
-    app = await createApp({ token: args.token, cors: args.cors, publicUrl: args['public-url'] });
+    app = await createApp({ token: args.token, cors: args.cors, publicUrl: args['public-url'], allowPrivateWebhooks: args['allow-private-webhooks'] || undefined });
   } catch (err) {
     console.error(err.message);
     process.exit(1);
@@ -514,5 +548,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`Media manager running at http://localhost:${port}`);
     console.log(config.token ? 'API token required for write operations.' : 'Warning: MEDIA_API_TOKEN not set — write API is open.');
     if (config.corsOrigins.length) console.log(`Browser access from other websites allowed for: ${config.corsOrigins.join(', ')}`);
+    if (config.allowPrivateWebhooks) console.log('Webhooks may call private network addresses (local testing only).');
+    if (!config.publicUrl) console.log('Tip: set --public-url=https://your-cms.example for feed links in production.');
   });
 }

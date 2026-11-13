@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.7.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.8.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.8 (security fixes):** webhook signatures now cover a timestamp (`X-Webhook-Timestamp`; **receivers must update their check**, §8). Webhooks can't reach private network addresses unless allowed. Live feeds have connection and buffer limits and re-check key access on every message. Feed links and `url` fields reject control characters. See the release notes in the pull request for the full list.
+>
 > **New in 0.7:** the admin **Embed** tab: choose a component for a stream, set its options, see a live preview and copy the code for your website.
 >
 > **New in 0.6:** the **Streams UI component library**: web components (`<stream-list>`, `<stream-calendar>`, `<stream-map>`…) that show streams on any website as HTML. See §15a and [UI.md](UI.md).
@@ -79,7 +81,7 @@ Both modules share one server, one admin UI, one API token and one data director
 
 | Status | When |
 | --- | --- |
-| `400` | Invalid JSON, a validation failure (`details.errors` lists **every** problem), an unknown filter or sort field, an attempt to change a slug, or a publish action on a stream without draft & publish |
+| `400` | Invalid JSON, a body that isn't a JSON object where one is expected, a malformed URL path, an invalid `Host` header, a validation failure (`details.errors` lists **every** problem), an unknown filter or sort field, an attempt to change a slug, or a publish action on a stream without draft & publish |
 | `401` | Missing, invalid or expired credential on a write or a draft read, or a stream key used where only the main token is allowed |
 | `403` | A valid stream key that lacks the scope this operation needs |
 | `404` | The stream, item, webhook, file or folder doesn't exist. Drafts also return `404` to anonymous readers. |
@@ -101,7 +103,7 @@ In a batch, the paths are prefixed with the item's index: `[3].data.total`.
 | `richtext` | Markdown string | `maxLength` (default 1 000 000) | string; the API doesn't render it |
 | `uid` | Lowercase `a-z`, `0-9` and single hyphens (`my-first-post`) | `targetField`, `maxLength` (≤ 255) | string. **Always unique.** |
 | `email` | An email address | `unique` | string |
-| `url` | An `http(s)` URL | `unique` | string |
+| `url` | An `http(s)` URL with no spaces or control characters | `unique` | string |
 | `integer` | Whole JSON number | `min`, `max`, `unique` | number |
 | `number` | Finite JSON number | `min`, `max`, `unique` | number |
 | `boolean` | `true` / `false` | none | boolean |
@@ -425,10 +427,11 @@ Each stream can have up to 10 webhooks. You configure them through `PATCH /api/s
 ```
 POST <url>
 Content-Type: application/json
-User-Agent: media-manager-webhooks/0.3
+User-Agent: media-manager-webhooks/0.8
 X-Webhook-Event: item.published
 X-Webhook-Delivery: 6d0f…            (unique per delivery; use it to de-duplicate)
-X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the raw body, keyed with the secret>
+X-Webhook-Timestamp: 1794528894      (Unix seconds when this attempt was sent)
+X-Webhook-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>", keyed with the secret>
 
 { "id": "6d0f…", "type": "item.published", "stream": { "id": "…", "slug": "blog", "name": "Blog" },
   "item": { …full item… }, "createdAt": "2026-11-12T21:00:00.000Z" }
@@ -439,13 +442,23 @@ X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the raw body, keyed with the sec
   - A `deleted` payload carries the item as it was just before deletion.
   - Webhooks receive drafts and all status changes, because they are configured with the token.
 - **Retries:** a delivery is retried after a network error, a timeout (10 s) or any non-2xx response. There are up to 3 retries, after 1 s, 10 s and 60 s. Redirects are not followed.
+- **Blocked destinations:**
+  - By default, webhooks can't reach loopback, private (10/8, 172.16/12, 192.168/16), carrier-grade NAT, link-local (including cloud metadata at 169.254.169.254), multicast or reserved addresses, nor their IPv6 and IPv4-mapped forms.
+  - The check is made on the address that is actually connected to, after DNS resolution, so a hostname that resolves to a private address is blocked too.
+  - A blocked delivery fails at once with an error that starts with `Blocked:`, and is not retried.
+  - For local testing, start the server with `--allow-private-webhooks` (or `MEDIA_WEBHOOKS_ALLOW_PRIVATE=1`); `npm run start:local` does this.
+- **Queue limit:** at most 500 deliveries wait per webhook. Further ones are dropped, and `lastDelivery` reports `Queue full (500 waiting): N deliveries dropped`.
 - **Ordering:** deliveries to the same webhook are sent in order, one at a time. A slow endpoint delays only its own queue.
 - **Testing:** `POST /api/streams/:slug/webhooks/:id/test` sends one `ping` delivery (`item: null`) without retries and returns its result.
-- **Verifying a signature (Node.js):**
+- **Verifying a signature (Node.js).** Reject deliveries whose timestamp is more than a few minutes old: that stops a captured delivery from being replayed later.
   ```js
-  const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');
-  const ok = header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+  const ts = req.headers['x-webhook-timestamp'];
+  const fresh = Math.abs(Date.now() / 1000 - Number(ts)) <= 300;
+  const expected = 'sha256=' + createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex');
+  const sig = req.headers['x-webhook-signature'];
+  const ok = fresh && sig.length === expected.length && timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
   ```
+  Versions before 0.8 signed the body alone, without a timestamp.
 - Delivery is at-least-once and the queue lives in memory: deliveries still pending when the server restarts are lost. For guaranteed processing, poll by `after` instead (§9.2).
 
 ---
@@ -471,6 +484,11 @@ X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the raw body, keyed with the sec
   - The server first replays the currently stored items with a higher `seq` (only visible ones in the public view) as `created`, then switches to live messages.
   - Updates, publishes and deletes that happened while the client was disconnected aren't replayed; reconcile them with the list endpoint.
   - Without `Last-Event-ID` or `after`, nothing is replayed.
+- **Replay limit:** if more than 1000 items were missed, nothing is replayed. Instead the server sends `event: reset`, with `{ reason, missed, list }`, where `list` is the matching `…/items?after=<seq>` URL. The client should reload from the list endpoint. The components do this automatically.
+- **Access is checked on every message.** A stream key that is revoked, expires or loses the `read` scope stops receiving drafts immediately. The connection continues with the public view.
+- **Limits:**
+  - At most 1000 live connections per server; further ones get `503` with `Retry-After: 30`.
+  - A client that doesn't read is disconnected once 1 MB is waiting for it. Its `EventSource` reconnects and resumes with `Last-Event-ID`.
 - The server sends `retry: 3000` and a `: ping` comment every 25 s.
 - `?access_token=` exists because `EventSource` can't send headers. Tokens in URLs can end up in proxy logs, so prefer the header where your client supports it.
 
@@ -538,8 +556,13 @@ To choose a field yourself, pass the role as a parameter, e.g. `feed.ics?start=k
 - **CSV:**
   - The columns are `id`, `seq`, `timestamp`, `publishedAt` (on draft & publish streams), then one column per field.
   - Lists are joined with `; `, and objects are written as JSON.
-  - Text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`, so a spreadsheet does not run them as formulas.
-- Absolute links use `MEDIA_PUBLIC_URL` when it is set. Otherwise they are built from the request's `Host` header (and `X-Forwarded-Proto`).
+  - Text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`, so a spreadsheet does not run them as formulas. This also applies to lists joined into one cell. Real numbers (e.g. `-5`) are left as they are.
+- Absolute links use `MEDIA_PUBLIC_URL` when it is set. **Set it in production.** Otherwise:
+  - Links are built from the request's `Host` header. An invalid one returns `400`.
+  - `X-Forwarded-Proto` is honoured only for `https`; anything else means `http`.
+  - Responses carry `Vary: Host, X-Forwarded-Proto`, so caches keep them apart.
+- `link` and `site` must be `http(s)` URLs with no spaces or control characters. Anything else returns `400`, because a line break could inject iCalendar lines.
+- iCalendar text values escape every line break (including a lone carriage return) and drop other control characters. URL values have control characters removed.
 - Responses carry `Cache-Control: public, max-age=60`.
 
 ## 11. Cross-origin access (CORS)
@@ -664,6 +687,7 @@ $MEDIA_DATA_DIR/
 
 - **Item logs** are append-only JSON Lines; each change adds one line. On startup a log is replayed into memory, a line cut off by a crash is skipped, and the log is compacted when superseded lines pile up.
 - **Writes are serialized** within each log and within `db.json`. All reads are served from memory.
+- **Permissions:** the data directory is created with mode `0700`, and `db.json` and the item logs with `0600` (owner only). Files left by earlier versions are tightened when they are loaded. Uploaded media files are public anyway.
 - **Backup:** copy the data directory while no writes are happening. `db.json` holds webhook secrets, so protect it like a credential.
 
 | Env var | Default | Purpose |
@@ -675,8 +699,9 @@ $MEDIA_DATA_DIR/
 | `MEDIA_CORS_ORIGINS` (`--cors=`) | *(none)* | Websites allowed to call the API from a browser (§11) |
 | `MEDIA_PUBLIC_URL` (`--public-url=`) | *(from the Host header)* | Base URL for absolute links in feeds |
 | `MEDIA_TIMEZONE` | `UTC` | Default time zone for all-day dates in `.ics` feeds |
+| `MEDIA_WEBHOOKS_ALLOW_PRIVATE` (`--allow-private-webhooks`) | off | Let webhooks reach loopback / private addresses (local testing only) |
 
-`--token=`, `--port=`, `--host=`, `--cors=` and `--public-url=` can be passed after `npm start --`. They take priority over the environment variables.
+`--token=`, `--port=`, `--host=`, `--cors=`, `--public-url=` and `--allow-private-webhooks` can be passed after `npm start --`. They take priority over the environment variables.
 
 ## 17. Limits & non-goals (current version)
 
@@ -686,7 +711,7 @@ $MEDIA_DATA_DIR/
 | Auth | One main token with full access, plus per-stream keys with item-level scopes. There are no user accounts, roles or field-level permissions, and nothing is rate-limited per key. |
 | Content | Populating goes one level deep. No localization or version history. Markdown isn't rendered server-side. |
 | Scheduling | Precision is about 15 seconds. Schedules use absolute UTC times; there are no recurring schedules. |
-| Webhooks | The delivery queue lives in memory: pending retries are lost on restart. Redirects aren't followed. Destinations aren't restricted, so only token holders should be able to configure them. |
+| Webhooks | The delivery queue lives in memory: pending retries are lost on restart, and it holds at most 500 deliveries per webhook. Redirects aren't followed. Private network destinations are blocked unless allowed (§8). |
 | Rate limiting | Not built in. Put a reverse proxy in front if the API is exposed publicly. |
 | Maps | The server stores and filters pins but doesn't geocode addresses (convert an address into coordinates). |
 

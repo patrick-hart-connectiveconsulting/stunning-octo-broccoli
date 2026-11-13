@@ -68,6 +68,10 @@ const waitIn = (selector, inner, timeout = 5000) => page.waitForFunction(({ sele
 }, { selector, inner }, { timeout });
 
 test('every demo renders without page errors', async () => {
+  // Wait until no component is still loading (slower when other browser tests run at the same time).
+  await page.waitForFunction(() => ![...document.querySelectorAll('.live *')]
+    .filter((e) => e.localName.startsWith('stream-'))
+    .some((e) => !(e.shadowRoot || e).querySelector('.sui-root > *') || (e.shadowRoot || e).querySelector('.sui-message.sui-loading')), null, { timeout: 15000 });
   const empty = await page.evaluate(() => [...document.querySelectorAll('.live *')]
     .filter((e) => e.localName.startsWith('stream-'))
     .filter((e) => (e.shadowRoot || e).querySelector('.sui-message.sui-error, .sui-message.sui-loading'))
@@ -108,7 +112,11 @@ test('calendar: navigation, views, popup', async () => {
   await inEl(sel, (r) => [...r.querySelectorAll('[part~="view"]')].find((b) => b.textContent === 'Agenda').click());
   await waitIn(sel, '.sui-agenda, .sui-message');
   await inEl(sel, (r) => r.querySelector('[part~="today"]').click());
-  await waitIn(sel, '.sui-agenda-item');
+  // Wait for the refresh to show the current month before opening an event.
+  await page.waitForFunction(({ s, t }) => {
+    const r = document.querySelector(s).shadowRoot;
+    return r.querySelector('.sui-cal-title')?.textContent === t && r.querySelector('.sui-agenda-item');
+  }, { s: sel, t: title0 });
   await inEl(sel, (r) => r.querySelector('.sui-agenda-item').click());
   assert.equal(await inEl(sel, (r) => r.querySelector('dialog').open), true);
   assert.ok((await inEl(sel, (r) => r.querySelector('dialog h3').textContent)).length > 0);

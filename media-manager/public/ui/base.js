@@ -244,7 +244,7 @@ export class StreamElement extends HTMLElement {
       clearTimeout(timer);
       timer = setTimeout(() => this.refresh({ quiet: true }), 250);
     };
-    for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated']) src.addEventListener(type, update);
+    for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset']) src.addEventListener(type, update);
     this._source = src;
     this._sourceUrl = url;
   }

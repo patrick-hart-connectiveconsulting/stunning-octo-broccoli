@@ -81,6 +81,21 @@ dialog::backdrop { background: rgba(10, 10, 20, .35); }
     super.attributeChangedCallback(name, oldValue, newValue);
   }
 
+  /** Live updates and refreshes wait while an event popup is open, so the popup doesn't vanish under the reader. */
+  render() {
+    if (this._dialog?.open) {
+      if (!this._renderPending) {
+        this._renderPending = true;
+        this._dialog.addEventListener('close', () => {
+          this._renderPending = false;
+          this.render();
+        }, { once: true });
+      }
+      return;
+    }
+    super.render();
+  }
+
   isNarrow() {
     return !this.hasAttribute('no-responsive') && this.clientWidth > 0 && this.clientWidth < 560;
   }

@@ -185,8 +185,8 @@ npm test
 The tests take approximately 3 seconds. Make sure that the last lines show `fail 0`:
 
 ```
-# tests 41
-# pass 41
+# tests 53
+# pass 53
 # fail 0
 ```
 
@@ -204,6 +204,7 @@ node --test test/streams.test.js
 | `test/relations-keys-schedule.test.js` | Relations, API keys, scheduled publish and unpublish |
 | `test/formats-geo-cors.test.js` | CORS, map pins, dates, media in `populate`, calendar, RSS, JSON, GeoJSON and CSV formats |
 | `test/ui-core.test.js` | The component library helpers: safe Markdown, field roles, calendar dates, JSON-LD |
+| `test/security.test.js` | The security fixes: feed injection, unsafe links, header checks, downloads, live feed limits, webhook address checks, file permissions |
 
 > **CAUTION:** Do not use `--test-name-pattern` to do only one test in a file. The tests in a file use the data from the tests before them. A single test can fail when it starts without that data. Always do a full file.
 
@@ -432,6 +433,8 @@ For more API examples, open a stream in the admin page and click the **API** tab
 
 A webhook sends each change to a different server. On your computer, you can use a small receiver to see the requests.
 
+> **NOTE:** For security, the server does not send webhooks to private network addresses such as `localhost`. The command `npm run start:local` (step 3.1) allows these addresses for local tests. If you started the server in a different way, add `--allow-private-webhooks` to the command.
+
 1. Start a receiver in a new terminal. Keep this terminal open:
 
    ```bash
@@ -600,6 +603,7 @@ You can set these values as environment variables (see the table in step 3.1). F
 | `MEDIA_CORS_ORIGINS` | `--cors=` | *(not set)* | The websites that can use the API from a browser. Use a comma-separated list such as `https://www.example.com,http://localhost:5173`, or `*` for all websites. |
 | `MEDIA_PUBLIC_URL` | `--public-url=` | *(the address in the request)* | The public address of the server, for links in feeds. Example: `https://cms.example.com`. |
 | `MEDIA_TIMEZONE` | — | `UTC` | The time zone for all-day events in calendar feeds. Example: `Europe/London`. |
+| `MEDIA_WEBHOOKS_ALLOW_PRIVATE` | `--allow-private-webhooks` | *(off)* | Lets webhooks send to private network addresses, for example `localhost`. Use it for local tests only. |
 
 Example with options (all terminals):
 
@@ -621,6 +625,8 @@ PORT=4100 HOST=127.0.0.1 MEDIA_API_TOKEN=dev-token MEDIA_DATA_DIR=/tmp/mm-data M
 
 | Problem | Cause | Action |
 | --- | --- | --- |
+| **Send test** shows `Blocked: localhost is a private or reserved network address` | The server does not send webhooks to private network addresses. | For local tests, start the server with `npm run start:local`, or add `--allow-private-webhooks`. |
+| A webhook receiver rejects the signature after an update to version 0.8 | Version 0.8 signs the timestamp and the body together. | Change the check in the receiver. See the example on the **API** tab, or SPEC.md §8. |
 | A component shows `Cannot load from http://localhost:1338` | The server does not allow the website, or the server does not operate. | Start the server with the `--cors=` value from the message (section 10.3). |
 | `npm run test:browser` shows `Playwright is not installed` | Playwright is not installed. | Do step 10.5, step 1. |
 | A website on a different address gets `blocked by CORS policy` in the browser console | The server does not allow that website. | Start the server with the address of the website: `npm start -- --token=dev-token --cors=http://localhost:5173`. |

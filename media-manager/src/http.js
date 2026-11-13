@@ -41,6 +41,13 @@ export async function readJson(req, limit = 1024 * 1024) {
   }
 }
 
+/** Like readJson, but the body must be a JSON object (not null, an array or a primitive). */
+export async function readJsonObject(req, limit) {
+  const body = await readJson(req, limit);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'The request body must be a JSON object');
+  return body;
+}
+
 /** Parses `page` / `pageSize` query params and slices `items` accordingly. */
 export function paginate(items, url, { defaultSize = 25, maxSize = 100 } = {}) {
   const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);

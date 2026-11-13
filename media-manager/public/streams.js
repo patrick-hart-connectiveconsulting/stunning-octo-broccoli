@@ -411,7 +411,7 @@ function connectLive() {
   }, 300);
   src.onopen = () => { dot.className = 'live-dot on'; };
   src.onerror = () => { dot.className = 'live-dot err'; };
-  for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated']) src.addEventListener(type, refresh);
+  for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset']) src.addEventListener(type, refresh);
   src.addEventListener('stream-deleted', () => {
     toast('This stream was deleted', 'error');
     state.current = null;
@@ -966,7 +966,7 @@ function renderApiDocs() {
     [`Poll for new ${L.plural} after sequence 42`, `curl "${origin}${path}/items?after=42"`],
     ['Use a stream API key instead of the main token', `# Create one in Settings → API keys, then:\ncurl -X POST -H "Authorization: Bearer mmk_…" -H "Content-Type: application/json" \\\n  -d '{"data":{…}}' ${origin}${path}/items`],
     ['Subscribe live', `curl -N "${origin}${path}/subscribe"\n\n// or in the browser\nconst es = new EventSource('${path}/subscribe');\nes.addEventListener('created', (e) => console.log(JSON.parse(e.data)));`],
-    ['Verify a webhook signature (Node.js)', `import { createHmac, timingSafeEqual } from 'node:crypto';\n\nfunction verify(rawBody, header, secret) {\n  const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');\n  return header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected));\n}\n// header = req.headers['x-webhook-signature']`],
+    ['Verify a webhook signature (Node.js)', `import { createHmac, timingSafeEqual } from 'node:crypto';\n\n// signature = req.headers['x-webhook-signature'], timestamp = req.headers['x-webhook-timestamp']\nfunction verify(rawBody, signature, timestamp, secret) {\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false; // reject old (replayed) deliveries\n  const expected = 'sha256=' + createHmac('sha256', secret).update(\`\${timestamp}.\${rawBody}\`).digest('hex');\n  return signature.length === expected.length && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));\n}`],
   ];
 
   $('#apiDocs').replaceChildren(

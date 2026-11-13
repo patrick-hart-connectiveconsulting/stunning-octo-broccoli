@@ -91,7 +91,13 @@ export function linkOf(item, roles, ctx) {
 
 // ---- iCalendar (RFC 5545) ----------------------------------------------------
 
-const icsEscape = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+/** TEXT value (RFC 5545 §3.3.11). Any line break, including a bare CR, becomes \\n; other control characters are dropped. */
+const icsEscape = (s) => String(s)
+  .replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,')
+  .replace(/\r\n|\r|\n/g, '\\n')
+  .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+/** URI value: control characters (which could start a new content line) are removed. */
+const icsUri = (s) => String(s).replace(/[\u0000-\u0020\u007f]/g, (c) => (c === ' ' ? '%20' : ''));
 const icsUtc = (iso) => iso.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 const ymd = (s) => s.replace(/-/g, '');
 
@@ -159,7 +165,7 @@ export function toICS(stream, items, ctx) {
     const venue = textOf(item, roles.venue) || point?.label;
     if (venue) lines.push(`LOCATION:${icsEscape(venue)}`);
     if (point) lines.push(`GEO:${point.lat};${point.lng}`);
-    lines.push(`URL:${linkOf(item, roles, ctx)}`);
+    lines.push(`URL:${icsUri(linkOf(item, roles, ctx))}`);
     lines.push(`CREATED:${icsUtc(item.createdAt)}`, `LAST-MODIFIED:${icsUtc(item.updatedAt)}`, 'END:VEVENT');
   }
   lines.push('END:VCALENDAR');
@@ -278,7 +284,9 @@ export function toCSV(stream, items) {
     if (Array.isArray(v)) s = v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : x)).join('; ');
     else if (typeof v === 'object') s = JSON.stringify(v);
     else s = String(v);
-    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    // Neutralise anything a spreadsheet would run as a formula, including list
+    // values joined into one cell. Real numbers and booleans are left as they are.
+    if (typeof v !== 'number' && typeof v !== 'boolean' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const rows = items.map((i) => [i.id, i.seq, i.timestamp, ...(stream.draftAndPublish ? [i.publishedAt] : []), ...keys.map((k) => i.data?.[k])].map(cell).join(','));

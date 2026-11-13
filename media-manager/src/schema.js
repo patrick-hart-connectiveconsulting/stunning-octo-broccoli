@@ -156,6 +156,9 @@ function coerce(field, value, mediaExists, relationExists) {
       return { value: value.trim() };
     case 'url': {
       if (typeof value !== 'string' || value.length > 2000) return { error: 'must be an http(s) URL' };
+      // new URL() silently drops tabs and line breaks, so check the raw text: a
+      // stored line break would end up inside calendar feeds and headers.
+      if (/[\u0000-\u001f\u007f\s]/.test(value.trim()) || value !== value.trim()) return { error: 'must be an http(s) URL without spaces or control characters' };
       try {
         const u = new URL(value);
         if (!['http:', 'https:'].includes(u.protocol)) throw new Error();

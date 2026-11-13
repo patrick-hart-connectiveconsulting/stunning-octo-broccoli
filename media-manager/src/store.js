@@ -2,7 +2,7 @@
 // to disk atomically (write temp file + rename) after each mutation. Writes are
 // serialised so concurrent requests can never interleave a flush.
 
-import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -14,12 +14,13 @@ export class Store {
   }
 
   async load() {
-    await mkdir(dirname(this.file), { recursive: true });
+    await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
     try {
       const parsed = JSON.parse(await readFile(this.file, 'utf8'));
       this.data.files = parsed.files || [];
       this.data.folders = parsed.folders || [];
       this.data.streams = parsed.streams || [];
+      await chmod(this.file, 0o600).catch(() => {}); // tighten files written by older versions
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
       await this.flush();
@@ -31,7 +32,7 @@ export class Store {
     const snapshot = JSON.stringify(this.data, null, 2);
     const write = this.queue.then(async () => {
       const tmp = `${this.file}.${process.pid}.tmp`;
-      await writeFile(tmp, snapshot);
+      await writeFile(tmp, snapshot, { mode: 0o600 });
       await rename(tmp, this.file);
     });
     // Keep the chain alive even if one write fails; the caller still sees the error.

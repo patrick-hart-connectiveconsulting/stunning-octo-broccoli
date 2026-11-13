@@ -43,7 +43,7 @@ async function sse(path) {
 
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), 'content-'));
-  app = await createApp({ dataDir: dir, token: TOKEN, webhookOptions: { retryDelays: [20, 20], timeoutMs: 2000 } });
+  app = await createApp({ dataDir: dir, token: TOKEN, allowPrivateWebhooks: true, webhookOptions: { retryDelays: [20, 20], timeoutMs: 2000 } });
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${app.server.address().port}`;
 });
@@ -248,7 +248,9 @@ test('webhooks: signed deliveries, retries, test endpoint, hidden from anonymous
     while (received.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(received.map((r) => r.headers['x-webhook-event']), ['item.created', 'item.published']);
     for (const r of received) {
-      const expected = `sha256=${createHmac('sha256', hook.secret).update(r.body).digest('hex')}`;
+      const ts = r.headers['x-webhook-timestamp'];
+      assert.ok(Math.abs(Date.now() / 1000 - Number(ts)) < 60);
+      const expected = `sha256=${createHmac('sha256', hook.secret).update(`${ts}.${r.body}`).digest('hex')}`;
       assert.equal(r.headers['x-webhook-signature'], expected);
     }
     const payload = JSON.parse(received[1].body);

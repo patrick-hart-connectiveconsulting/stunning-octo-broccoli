@@ -18,7 +18,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 
-import { HttpError, send, readJson, paginate } from './http.js';
+import { HttpError, send, readJson, readJsonObject, paginate } from './http.js';
 import { EventLog } from './event-log.js';
 import { normalizeFields, validateData, parseFilterValue, fieldJsonSchema, isEmptyValue } from './schema.js';
 import { getTemplate } from './templates.js';
@@ -34,6 +34,9 @@ const DAY = 86400000;
 const KEY_PREFIX = 'mmk_';
 export const KEY_SCOPES = ['read', 'create', 'update', 'delete'];
 const MAX_KEYS = 50;
+const MAX_IN_VALUES = 500; // values in one filter[…][in] list
+const MAX_SSE_BUFFER = 1024 * 1024; // bytes queued for one slow live-feed client before it is dropped
+const HOST_HEADER = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
 export function slugify(text) {
   return String(text)
@@ -98,7 +101,7 @@ function upgradeStream(stream) {
   return stream;
 }
 
-export async function createStreamsApi({ store, dataDir, isMaster, bearer, webhookOptions = {}, schedulerIntervalMs = 15000, publicUrl = null }) {
+export async function createStreamsApi({ store, dataDir, isMaster, bearer, webhookOptions = {}, schedulerIntervalMs = 15000, publicUrl = null, maxSubscribers = 1000, maxReplay = 1000 }) {
   const eventDir = join(dataDir, 'events');
   await mkdir(eventDir, { recursive: true });
 
@@ -111,7 +114,21 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     for (const item of log.events.values()) track(stream, item);
   }
 
-  const subscribers = new Map(); // stream id -> Set<{ res, authed }>
+  const subscribers = new Map(); // stream id -> Set<{ res, authed(): boolean }>
+  let subscriberCount = 0;
+
+  /** Writes a frame; drops a client whose unread data passes MAX_SSE_BUFFER (it reconnects and resumes). */
+  function sendFrame(streamId, sub, frame) {
+    if (sub.res.writableLength > MAX_SSE_BUFFER) {
+      sub.res.destroy();
+      dropSubscriber(streamId, sub);
+      return;
+    }
+    sub.res.write(frame);
+  }
+  function dropSubscriber(streamId, sub) {
+    if (subscribers.get(streamId)?.delete(sub)) subscriberCount--;
+  }
   let heartbeat = null;
 
   const webhooks = new WebhookDispatcher({
@@ -387,21 +404,36 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     else if (type === 'published' && !wasVisible) publicFrame = frame('created', item);
     else if ((type === 'unpublished' || type === 'deleted') && wasVisible) publicFrame = frame('deleted', ref);
 
-    for (const sub of subs) {
-      if (sub.authed) sub.res.write(authedFrame);
-      else if (publicFrame) sub.res.write(publicFrame);
+    for (const sub of [...subs]) {
+      // Access is re-checked on every change, so a revoked or expired key stops seeing drafts at once.
+      if (sub.authed()) sendFrame(stream.id, sub, authedFrame);
+      else if (publicFrame) sendFrame(stream.id, sub, publicFrame);
     }
   }
 
   function notifyStream(stream, type, payload) {
-    for (const sub of subscribers.get(stream.id) || []) {
-      const body = type === 'stream-updated' ? summary(stream, { read: sub.authed }) : payload;
-      sub.res.write(`event: ${type}\ndata: ${JSON.stringify(body)}\n\n`);
+    for (const sub of [...(subscribers.get(stream.id) || [])]) {
+      const body = type === 'stream-updated' ? summary(stream, { read: sub.authed() }) : payload;
+      sendFrame(stream.id, sub, `event: ${type}\ndata: ${JSON.stringify(body)}\n\n`);
     }
   }
 
   function subscribe(req, res, stream, url) {
-    const authed = can(req, stream, 'read', url);
+    if (subscriberCount >= maxSubscribers) {
+      res.writeHead(503, { 'Retry-After': '30', 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: { status: 503, message: 'Too many live connections. Try again later.' } }));
+      return;
+    }
+    // The main token stays valid for the life of the server; a key is looked up again on every write.
+    const master = isMaster(req, url);
+    const key = master ? null : keyFor(req, url, stream);
+    const keyId = key?.scopes.includes('read') ? key.id : null;
+    const authed = () => {
+      if (master) return true;
+      if (!keyId) return false;
+      const k = stream.apiKeys.find((x) => x.id === keyId);
+      return Boolean(k && k.scopes.includes('read') && !(k.expiresAt && k.expiresAt <= nowIso()));
+    };
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
@@ -415,21 +447,27 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     const after = rawAfter === null || rawAfter === undefined || rawAfter === '' ? NaN : Number(rawAfter);
     if (Number.isInteger(after) && after >= 0) {
       const missed = logs.get(stream.id).all()
-        .filter((e) => e.seq > after && (authed || isVisible(stream, e)))
+        .filter((e) => e.seq > after && (authed() || isVisible(stream, e)))
         .sort((a, b) => a.seq - b.seq);
-      for (const e of missed) res.write(`id: ${e.seq}\nevent: created\ndata: ${JSON.stringify(e)}\n\n`);
+      if (missed.length > maxReplay) {
+        // Too much to replay over a live connection: tell the client to reload the list instead.
+        res.write(`event: reset\ndata: ${JSON.stringify({ reason: 'too many missed items', missed: missed.length, list: `/api/streams/${stream.slug}/items?after=${after}` })}\n\n`);
+      } else {
+        for (const e of missed) res.write(`id: ${e.seq}\nevent: created\ndata: ${JSON.stringify(e)}\n\n`);
+      }
     }
 
     if (!subscribers.has(stream.id)) subscribers.set(stream.id, new Set());
     const sub = { res, authed };
     subscribers.get(stream.id).add(sub);
+    subscriberCount++;
     if (!heartbeat) {
       heartbeat = setInterval(() => {
-        for (const subs of subscribers.values()) for (const s of subs) s.res.write(': ping\n\n');
+        for (const [streamId, subs] of subscribers) for (const s of [...subs]) sendFrame(streamId, s, ': ping\n\n');
       }, 25000);
       heartbeat.unref();
     }
-    req.on('close', () => subscribers.get(stream.id)?.delete(sub));
+    req.on('close', () => dropSubscriber(stream.id, sub));
   }
 
   // ---- retention -----------------------------------------------------------
@@ -562,7 +600,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   async function createStream(req, res) {
     requireMaster(req);
-    const body = await readJson(req);
+    const body = await readJsonObject(req);
     const name = optionalText(body.name, 'name', 100);
     if (!name) fail(400, 'Validation failed', [{ path: 'name', message: 'is required' }]);
     const slug = body.slug === undefined || body.slug === '' ? slugify(name) : body.slug;
@@ -603,7 +641,8 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   async function updateStream(req, res, stream) {
     requireMaster(req);
-    const body = await readJson(req);
+    const body = await readJsonObject(req);
+    if (!store.data.streams.includes(stream)) fail(404, `Stream "${stream.slug}" not found`); // deleted while the body arrived
     const patch = {};
     if (body.slug !== undefined && body.slug !== stream.slug) {
       fail(400, 'A stream slug cannot be changed — it is part of every client URL. Create a new stream instead.');
@@ -654,7 +693,10 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     for (const key of [...scheduled.keys()]) if (key.startsWith(`${stream.id}:`)) scheduled.delete(key);
     rebuildKeyIndex();
     notifyStream(stream, 'stream-deleted', { id: stream.id, slug: stream.slug });
-    for (const sub of subscribers.get(stream.id) || []) sub.res.end();
+    for (const sub of [...(subscribers.get(stream.id) || [])]) {
+      sub.res.end();
+      dropSubscriber(stream.id, sub);
+    }
     subscribers.delete(stream.id);
     send(res, 200, result);
   }
@@ -728,7 +770,8 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       if (m === 'GET') return send(res, 200, { data: stream.apiKeys.map(publicKey) });
       if (m !== 'POST') fail(405, 'Method not allowed');
       if (stream.apiKeys.length >= MAX_KEYS) fail(400, `At most ${MAX_KEYS} API keys per stream`);
-      const input = parseKeyInput(await readJson(req));
+      const input = parseKeyInput(await readJsonObject(req));
+      if (!store.data.streams.includes(stream)) fail(404, `Stream "${stream.slug}" not found`);
       const secret = KEY_PREFIX + randomBytes(24).toString('base64url');
       const key = {
         id: randomUUID(),
@@ -750,7 +793,9 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     if (!key) fail(404, 'API key not found');
     if (m === 'GET') return send(res, 200, publicKey(key));
     if (m === 'PATCH' || m === 'PUT') {
-      Object.assign(key, parseKeyInput(await readJson(req), key));
+      const input = parseKeyInput(await readJsonObject(req), key);
+      if (!stream.apiKeys.includes(key)) fail(404, 'API key not found'); // revoked while the body arrived
+      Object.assign(key, input);
       await store.flush();
       return send(res, 200, publicKey(key));
     }
@@ -780,12 +825,30 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       const geo = op === 'within' || op === 'near';
       if (geo && field?.type !== 'geopoint') fail(400, `filter[${name}][${op}] only works on map pin (geopoint) fields`);
       if (!geo && field?.type === 'geopoint') fail(400, `Map pin fields support filter[${name}][within]=minLng,minLat,maxLng,maxLat and filter[${name}][near]=lat,lng,km`);
-      filters.push({ name, op, raw, type: field?.type, geo: geo ? parseGeoFilter(op, raw, name) : null });
+      const parts = op === 'in' ? raw.split(',') : null;
+      if (parts && parts.length > MAX_IN_VALUES) fail(400, `filter[${name}][in] takes at most ${MAX_IN_VALUES} values`);
+      filters.push({ name, op, raw, parts, lower: raw.toLowerCase(), type: field?.type, geo: geo ? parseGeoFilter(op, raw, name) : null });
     }
-    const compare = (v, op, raw, type) => {
-      if (op === 'contains') return v != null && String(typeof v === 'object' ? JSON.stringify(v) : v).toLowerCase().includes(raw.toLowerCase());
-      if (op === 'in') return raw.split(',').some((part) => parseFilterValue(type, part, v) === v);
-      const x = parseFilterValue(type, raw, v);
+    // Values are converted once per request when the field type is known. In
+    // schema-less streams the type comes from each stored value, so per item.
+    const typed = new Map();
+    const valueOf = (raw, type, sample) => {
+      if (!type) return parseFilterValue(type, raw, sample);
+      const key = `${type}\u0000${raw}`;
+      if (!typed.has(key)) typed.set(key, parseFilterValue(type, raw, sample));
+      return typed.get(key);
+    };
+    const inSets = new Map(); // filter -> Map(type -> Set of converted values)
+    const compare = (v, op, raw, type, f) => {
+      if (op === 'contains') return v != null && String(typeof v === 'object' ? JSON.stringify(v) : v).toLowerCase().includes(f.lower);
+      if (op === 'in') {
+        if (!type) return f.parts.some((part) => parseFilterValue(type, part, v) === v);
+        // One Set per filter and type ('string' is used for array elements).
+        const byType = inSets.get(f) ?? inSets.set(f, new Map()).get(f);
+        if (!byType.has(type)) byType.set(type, new Set(f.parts.map((p) => valueOf(p, type, v))));
+        return byType.get(type).has(v);
+      }
+      const x = valueOf(raw, type, v);
       if (op === 'eq') return v === x;
       if (op === 'ne') return v !== x;
       if (v === null || v === undefined) return false;
@@ -795,15 +858,16 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       return v <= x; // lte
     };
     return (item) =>
-      filters.every(({ name, op, raw, type, geo }) => {
+      filters.every((f) => {
+        const { name, op, raw, type, geo } = f;
         const v = item.data?.[name];
         if (geo) return v != null && matchGeo(geo, v);
         // Arrays (tags, multiple relations): eq / in / contains match if any element matches; ne if none does.
         if (Array.isArray(v) && type !== 'json') {
-          if (op === 'ne') return !v.some((el) => compare(el, 'eq', raw, 'string'));
-          return v.some((el) => compare(el, op, raw, 'string'));
+          if (op === 'ne') return !v.some((el) => compare(el, 'eq', raw, 'string', f));
+          return v.some((el) => compare(el, op, raw, 'string', f));
         }
-        return compare(v, op, raw, type === 'relation' ? 'string' : type);
+        return compare(v, op, raw, type === 'relation' ? 'string' : type, f);
       });
   }
 
@@ -949,10 +1013,18 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     'items.csv': { type: 'text/csv; charset=utf-8', limit: 100000, render: toCSV, download: 'csv' },
   };
 
+  /**
+   * Base URL for absolute links. Without MEDIA_PUBLIC_URL it comes from the
+   * request, so the Host header is validated and the protocol can only be
+   * http or https (no javascript:// or other schemes from a spoofed header).
+   */
   function originOf(req) {
     if (publicUrl) return publicUrl.replace(/\/+$/, '');
-    const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
-    return `${proto}://${req.headers.host || 'localhost'}`;
+    const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    const proto = forwarded === 'https' ? 'https' : 'http';
+    const host = req.headers.host || 'localhost';
+    if (!HOST_HEADER.test(host)) fail(400, 'Invalid Host header');
+    return `${proto}://${host}`;
   }
 
   /** Published items in a standard format. Filters, since/until and sort work as on /items. */
@@ -981,7 +1053,10 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     const link = url.searchParams.get('link');
     const site = url.searchParams.get('site');
     for (const [k, v] of [['link', link], ['site', site]]) {
-      if (v && !/^https?:\/\//.test(v)) fail(400, `${k} must start with http:// or https://`);
+      // Control characters would let the value start a new line (iCalendar property injection).
+      if (v && (!/^https?:\/\//.test(v) || /[\u0000-\u0020\u007f]/.test(v))) {
+        fail(400, `${k} must be an http(s) URL without spaces or control characters`);
+      }
     }
     const body = format.render(stream, items, {
       overrides,
@@ -996,6 +1071,8 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       getFile: (id) => store.getFile(id),
     });
     const headers = { 'Content-Type': format.type, 'Cache-Control': 'public, max-age=60' };
+    // Links depend on these request headers unless MEDIA_PUBLIC_URL is set: caches must key on them.
+    if (!publicUrl) headers.Vary = 'Host, X-Forwarded-Proto';
     if (format.download) headers['Content-Disposition'] = `attachment; filename="${stream.slug}.${format.download}"`;
     res.writeHead(200, headers);
     res.end(body);
@@ -1010,6 +1087,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
   async function createItems(req, res, stream) {
     requireScope(req, stream, 'create');
     const body = await readJson(req, 10 * 1024 * 1024);
+    if (!logs.has(stream.id)) fail(404, `Stream "${stream.slug}" not found`); // deleted while the body arrived
     const batch = Array.isArray(body);
     const inputs = batch ? body : [body];
     if (!inputs.length) fail(400, 'No items provided');
@@ -1062,10 +1140,13 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   async function updateItem(req, res, stream, id, merge) {
     requireScope(req, stream, 'update');
-    const existing = logs.get(stream.id).get(id);
-    if (!existing) fail(404, 'Item not found');
+    if (!logs.get(stream.id).get(id)) fail(404, 'Item not found'); // fail fast, before reading the body
     const body = await readJson(req, 10 * 1024 * 1024);
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'Body must be an object like { "data": { … } }');
+    // Read the item only now: it may have changed or been deleted while the body arrived.
+    // Using the earlier copy would overwrite those changes or bring a deleted item back.
+    const existing = logs.get(stream.id)?.get(id);
+    if (!existing) fail(404, 'Item not found');
     if (!merge && !('data' in body)) fail(400, 'Validation failed', [{ path: 'data', message: 'is required for PUT (use PATCH for partial updates)' }]);
     if (body.publish !== undefined && typeof body.publish !== 'boolean') fail(400, 'Validation failed', [{ path: 'publish', message: 'must be true or false' }]);
 
@@ -1222,6 +1303,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
     webhooks.close();
     for (const subs of subscribers.values()) for (const s of subs) s.res.end();
     subscribers.clear();
+    subscriberCount = 0;
   }
 
   return { route, close, runScheduler };

@@ -65,7 +65,7 @@ To see every component working, start the server, run `npm run seed:demo`, and o
 | `template` | `my-template-id` | Use a `<template>` elsewhere on the page (§3.4) |
 | `jsonld` | – | Add schema.org JSON-LD for search engines, from the stream's `schemaType` |
 | `empty-text`, `loading-text` | `No events yet.` | Messages |
-| `key` | `mmk_…` | A **read-only** stream API key, needed only to show drafts (e.g. on a preview site). **Never use the main token or a key with write scopes in a page.** |
+| `key` | `mmk_…` | A **read-only** stream API key, needed only to show drafts (e.g. on a preview site). It is sent in a header, also for `live`, never in a URL. **Never use the main token or a key with write scopes in a page.** |
 | `title-field`, `date-field` (or `start-field`), `end-field`, `image-field`, `description-field`, `body-field`, `location-field`, `venue-field`, `url-field`, `tags-field` | `date-field="kickoff"` | Choose which field fills each role. Usually unnecessary: roles are detected from field names (`title`/`name`, `start`, `excerpt`/`description`, the first media field…). |
 
 ### 2.2 Component-specific attributes

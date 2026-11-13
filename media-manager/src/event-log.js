@@ -86,6 +86,7 @@ export class EventLog {
   compact() {
     return this.#enqueue(async () => {
       const tmp = `${this.file}.${process.pid}.tmp`;
+      await unlink(tmp).catch(() => {}); // a stale file from a crash would keep its old permissions
       const text = this.all().map((event) => `${JSON.stringify({ op: 'put', event })}\n`).join('');
       await writeFile(tmp, text, { mode: 0o600 });
       await rename(tmp, this.file);

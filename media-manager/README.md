@@ -185,8 +185,8 @@ npm test
 The tests take approximately 3 seconds. Make sure that the last lines show `fail 0`:
 
 ```
-# tests 53
-# pass 53
+# tests 60
+# pass 60
 # fail 0
 ```
 
@@ -205,6 +205,7 @@ node --test test/streams.test.js
 | `test/formats-geo-cors.test.js` | CORS, map pins, dates, media in `populate`, calendar, RSS, JSON, GeoJSON and CSV formats |
 | `test/ui-core.test.js` | The component library helpers: safe Markdown, field roles, calendar dates, JSON-LD |
 | `test/security.test.js` | The security fixes: feed injection, unsafe links, header checks, downloads, live feed limits, webhook address checks, file permissions |
+| `test/hardening.test.js` | Admin page security headers, large uploads, generated slugs, hidden schedule details, nested quotes |
 
 > **CAUTION:** Do not use `--test-name-pattern` to do only one test in a file. The tests in a file use the data from the tests before them. A single test can fail when it starts without that data. Always do a full file.
 
@@ -557,7 +558,7 @@ The browser tests examine all components in Chromium. They need Playwright, whic
    npm run test:browser
    ```
 
-3. Make sure that the last lines show `pass 14` and `fail 0`.
+3. Make sure that the last lines show `pass 16` and `fail 0`.
 
 The tests start their own server with a temporary data folder. They do not use your data.
 

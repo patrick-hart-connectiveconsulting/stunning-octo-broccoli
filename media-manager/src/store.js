@@ -2,7 +2,7 @@
 // to disk atomically (write temp file + rename) after each mutation. Writes are
 // serialised so concurrent requests can never interleave a flush.
 
-import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -32,6 +32,7 @@ export class Store {
     const snapshot = JSON.stringify(this.data, null, 2);
     const write = this.queue.then(async () => {
       const tmp = `${this.file}.${process.pid}.tmp`;
+      await unlink(tmp).catch(() => {}); // a stale file from a crash would keep its old permissions
       await writeFile(tmp, snapshot, { mode: 0o600 });
       await rename(tmp, this.file);
     });

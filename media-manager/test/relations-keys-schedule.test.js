@@ -239,8 +239,14 @@ test('scheduled publish and unpublish', async () => {
   await waitFor(/event: created/);
   const live = (await call(s, { token: null })).data.data;
   assert.equal(live.length, 1);
-  assert.equal(live[0].publishAt, null);
-  assert.ok(live[0].unpublishAt);
+  // Scheduling details are for editors only.
+  assert.equal('publishAt' in live[0], false);
+  assert.equal('unpublishAt' in live[0], false);
+  assert.match(buf, /event: created/);
+  assert.ok(!/unpublishAt/.test(buf), 'the public live feed must not reveal the takedown time');
+  const editorView = (await call(`${s}/${item.data.id}`)).data;
+  assert.equal(editorView.publishAt, null);
+  assert.ok(editorView.unpublishAt);
 
   await waitFor(/event: deleted/);
   ctrl.abort();

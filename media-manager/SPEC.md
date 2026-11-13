@@ -1,6 +1,6 @@
 # Media Manager: Specification
 
-**Version:** 0.8.0 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
+**Version:** 0.8.1 (draft) · **Status:** implemented, as described below · **Runtime:** Node.js ≥ 20, no dependencies
 
 Media Manager is a lightweight, self-hosted alternative to a headless CMS, modeled on Strapi. It has two modules:
 
@@ -9,6 +9,8 @@ Media Manager is a lightweight, self-hosted alternative to a headless CMS, model
 
 Both modules share one server, one admin UI, one API token and one data directory.
 
+> **New in 0.8.1 (hardening):** the admin pages send a strict Content-Security-Policy and can't be framed. The admin page and components send tokens and keys in a header on the live feed, never in the URL. Anonymous readers no longer see `publishAt` / `unpublishAt` / `scheduleError`. Oversized bodies get a proper `413` response.
+>
 > **New in 0.8 (security fixes):** webhook signatures now cover a timestamp (`X-Webhook-Timestamp`; **receivers must update their check**, §8). Webhooks can't reach private network addresses unless allowed. Live feeds have connection and buffer limits and re-check key access on every message. Feed links and `url` fields reject control characters. See the release notes in the pull request for the full list.
 >
 > **New in 0.7:** the admin **Embed** tab: choose a component for a stream, set its options, see a live preview and copy the code for your website.
@@ -87,7 +89,7 @@ Both modules share one server, one admin UI, one API token and one data director
 | `404` | The stream, item, webhook, file or folder doesn't exist. Drafts also return `404` to anonymous readers. |
 | `405` | The method isn't supported on this route |
 | `409` | A duplicate stream slug or folder name, deleting a folder that isn't empty, or deleting a stream other streams relate to |
-| `413` | The body is larger than the limit |
+| `413` | The body is larger than the limit. The server answers, then closes the connection without reading the rest of the body. |
 | `500` | Unexpected server error. The details are logged on the server and not exposed. |
 
 In a batch, the paths are prefixed with the item's index: `[3].data.total`.
@@ -130,7 +132,7 @@ Every field can also have `required` (default `false`) and `description` (≤ 50
 ### 3.2 Unique values and UIDs
 
 - `unique: true` (on string, email, url, integer or number fields) and every `uid` field mean that no two items in the stream may hold the same non-empty value. The check is exact and case-sensitive. A clash returns `400` with `"must be unique — another item already uses this value"`.
-- A `uid` field with a `targetField` (which must be a `string` or `text` field) is **generated automatically** when left empty: `"Hello World!"` becomes `hello-world`. If that value is taken, the server tries `hello-world-2`, `hello-world-3` and so on. Generated values never cause a clash error; values you provide explicitly do.
+- A `uid` field with a `targetField` (which must be a `string` or `text` field) is **generated automatically** when left empty: `"Hello World!"` becomes `hello-world`. If that value is taken, the server tries `hello-world-2`, `hello-world-3` and so on. Generated values never cause a clash error, and the suffix is fitted within the field's `maxLength`. Values you provide explicitly do cause a clash error.
 - Uniqueness also holds within one batch request.
 
 ### 3.3 Relations
@@ -291,7 +293,7 @@ Permanently deletes the stream and its item log. Live subscribers get a `stream-
 
 - `timestamp` is **when the item happened or is dated**. The client can set it, and it defaults to the time the server received the item. Time-range filters, the default sort and retention use it.
 - `publishedAt` is `null` for drafts. On streams without draft & publish it equals `createdAt`.
-- `publishAt` and `unpublishAt` hold pending schedules (§6.1). They exist only on draft & publish streams and are `null` when nothing is scheduled.
+- `publishAt` and `unpublishAt` hold pending schedules (§6.1). They exist only on draft & publish streams and are `null` when nothing is scheduled. They and `scheduleError` are returned only to requesters who can read drafts (the main token, or a `read` key): anonymous readers can't see when an item will be taken down.
 - `scheduleError` appears only after a scheduled publish failed, and explains why (§6.1).
 - `seq` is assigned when the item is created and never changes.
 
@@ -490,7 +492,7 @@ X-Webhook-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>", keyed 
   - At most 1000 live connections per server; further ones get `503` with `Retry-After: 30`.
   - A client that doesn't read is disconnected once 1 MB is waiting for it. Its `EventSource` reconnects and resumes with `Last-Event-ID`.
 - The server sends `retry: 3000` and a `: ping` comment every 25 s.
-- `?access_token=` exists because `EventSource` can't send headers. Tokens in URLs can end up in proxy logs, so prefer the header where your client supports it.
+- `?access_token=` exists because `EventSource` can't send headers. Tokens in URLs can end up in proxy logs, so prefer the header where your client supports it. The admin page and the components (`key` attribute) use a fetch-based client that sends `Authorization: Bearer …`, and never put a token or key in the URL.
 
 ```js
 const es = new EventSource('/api/streams/blog/subscribe');
@@ -631,6 +633,11 @@ POST /api/streams/orders/keys
 ---
 
 ## 15. Admin UI
+
+**Security headers.**
+- The admin pages (`/` and `/streams.html`) are served with a Content-Security-Policy. Scripts may come only from this server (no inline or third-party scripts); images also from `data:`, `blob:` and the OpenStreetMap tile server; connections only to this server; `frame-ancestors 'none'`. They also send `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`.
+- Other HTML pages (e.g. `/ui/demo.html`) can't be framed either.
+- These pages keep the main token in the browser, so the policy limits what injected or third-party script could do with it. **Admin login is still not built in:** don't expose the admin pages beyond your team.
 
 | Page | Path | Capabilities |
 | --- | --- | --- |

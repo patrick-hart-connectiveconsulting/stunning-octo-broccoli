@@ -39,6 +39,8 @@ before(async () => {
   await ctx.addInitScript((t) => localStorage.setItem('mm-token', t), TOKEN);
   page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => { if (/Content Security Policy|Refused to/i.test(m.text())) errors.push(`CSP: ${m.text()}`); });
+  page.on('request', (r) => { if (/access_token=/.test(r.url())) errors.push(`token in URL: ${r.url()}`); });
   await page.route('https://tile.openstreetmap.org/**', (route) => route.abort());
 });
 
@@ -109,4 +111,50 @@ test('copy button and CORS note; no page errors', async () => {
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   assert.equal(clip, await code());
   assert.deepEqual(errors, []);
+});
+
+test('admin live view works with the token in a header (never in a URL), under the page CSP', async () => {
+  await page.goto(`${base}/streams.html?stream=demo-blog`);
+  await page.waitForSelector('#liveDot.on');
+  const before = await page.locator('#eventsBody tr').count();
+  // A draft is only visible to editors: it appears only if the live feed is authenticated.
+  await fetch(`${base}/api/streams/demo-blog/items`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { title: 'Live draft via header', body: 'x' } }),
+  });
+  await page.waitForFunction((n) => document.querySelectorAll('#eventsBody tr').length === n + 1, before, { timeout: 5000 });
+  assert.match(await page.textContent('#eventsBody'), /Live draft via header/);
+  // Media Library page loads cleanly under its CSP too.
+  await page.goto(`${base}/`);
+  await page.waitForSelector('#summary:not(:empty)');
+  assert.deepEqual(errors, []);
+});
+
+test('a component with a read key gets live drafts without the key in the URL', async () => {
+  const { key } = await fetch(`${base}/api/streams/demo-blog/keys`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Preview', scopes: ['read'] }),
+  }).then((r) => r.json());
+  await page.goto(`${base}/ui/demo.html`);
+  await page.evaluate((k) => {
+    const el = document.createElement('stream-list');
+    el.id = 'preview';
+    el.setAttribute('src', '/api/streams/demo-blog');
+    el.setAttribute('filter', 'status=all');
+    el.setAttribute('key', k);
+    el.setAttribute('live', '');
+    el.setAttribute('limit', '50');
+    document.body.prepend(el);
+  }, key);
+  await page.waitForFunction(() => document.querySelector('#preview').shadowRoot?.querySelector('.sui-item'));
+  await new Promise((r) => setTimeout(r, 300));
+  await fetch(`${base}/api/streams/demo-blog/items`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { title: 'Second live draft' } }),
+  });
+  await page.waitForFunction(() => document.querySelector('#preview').shadowRoot.textContent.includes('Second live draft'), null, { timeout: 5000 });
+  assert.deepEqual(errors.filter((e) => e.startsWith('token in URL')), []);
 });

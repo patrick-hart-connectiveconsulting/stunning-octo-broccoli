@@ -206,6 +206,13 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   const isVisible = (stream, item) => !stream.draftAndPublish || item.publishedAt != null;
 
+  /** The public view of an item: scheduling details (e.g. when it will be taken down) are for editors only. */
+  const publicItem = (item) => {
+    if (!('publishAt' in item) && !('unpublishAt' in item) && !('scheduleError' in item)) return item;
+    const { publishAt, unpublishAt, scheduleError, ...rest } = item;
+    return rest;
+  };
+
   const summary = (stream, { master = false, read = master } = {}) => {
     const log = logs.get(stream.id);
     let itemCount = 0;
@@ -314,8 +321,12 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       if (v == null) continue;
       const clash = (candidate) => taken.has(candidate) && taken.get(candidate) !== id;
       if (generated.has(name)) {
+        const max = stream.fields.find((f) => f.name === name)?.maxLength ?? 255;
         let candidate = v;
-        for (let n = 2; clash(candidate); n++) candidate = `${v}-${n}`;
+        for (let n = 2; clash(candidate); n++) {
+          const suffix = `-${n}`;
+          candidate = `${v.slice(0, max - suffix.length).replace(/-+$/, '')}${suffix}`; // stays within maxLength
+        }
         out[name] = candidate;
       } else if (clash(v)) {
         errors.push({ path: `${prefix}data.${name}`, message: 'must be unique — another item already uses this value' });
@@ -399,9 +410,10 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
     const authedFrame = frame(type, type === 'deleted' ? ref : item, type === 'created' ? item.seq : undefined);
     let publicFrame = null;
-    if (type === 'created' && nowVisible) publicFrame = frame('created', item, item.seq);
-    else if (type === 'updated' && nowVisible) publicFrame = frame('updated', item);
-    else if (type === 'published' && !wasVisible) publicFrame = frame('created', item);
+    const pub = publicItem(item);
+    if (type === 'created' && nowVisible) publicFrame = frame('created', pub, item.seq);
+    else if (type === 'updated' && nowVisible) publicFrame = frame('updated', pub);
+    else if (type === 'published' && !wasVisible) publicFrame = frame('created', pub);
     else if ((type === 'unpublished' || type === 'deleted') && wasVisible) publicFrame = frame('deleted', ref);
 
     for (const sub of [...subs]) {
@@ -453,7 +465,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
         // Too much to replay over a live connection: tell the client to reload the list instead.
         res.write(`event: reset\ndata: ${JSON.stringify({ reason: 'too many missed items', missed: missed.length, list: `/api/streams/${stream.slug}/items?after=${after}` })}\n\n`);
       } else {
-        for (const e of missed) res.write(`id: ${e.seq}\nevent: created\ndata: ${JSON.stringify(e)}\n\n`);
+        for (const e of missed) res.write(`id: ${e.seq}\nevent: created\ndata: ${JSON.stringify(authed() ? e : publicItem(e))}\n\n`);
       }
     }
 
@@ -567,6 +579,9 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
           item = { ...item, publishedAt: now, publishAt: null, scheduleError: null, updatedAt: now };
           await putItems(stream, [item]);
           notify(stream, 'published', item, { wasVisible });
+          // A request may have changed or deleted the item while that write was saved.
+          item = logs.get(stream.id)?.get(ref.id);
+          if (!item) continue;
         }
         if (item.unpublishAt && item.unpublishAt <= now) {
           const wasVisible = isVisible(stream, item);
@@ -927,7 +942,7 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
       const resolve = (id) => {
         const it = log?.get(id);
         if (!it || (!seeDrafts && !isVisible(target, it))) return null;
-        return it;
+        return seeDrafts ? it : publicItem(it);
       };
       return [f, resolve];
     });
@@ -1000,7 +1015,8 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   function listItems(req, res, stream, url) {
     const page = paginate(queryItems(req, stream, url), url, { defaultSize: 25, maxSize: 500 });
-    send(res, 200, { ...page, data: populate(req, stream, page.data, url) });
+    const editor = can(req, stream, 'read');
+    send(res, 200, { ...page, data: populate(req, stream, editor ? page.data : page.data.map(publicItem), url) });
   }
 
   // ---- standard formats ------------------------------------------------------
@@ -1080,8 +1096,9 @@ export async function createStreamsApi({ store, dataDir, isMaster, bearer, webho
 
   function getItem(req, res, stream, id, url) {
     const item = logs.get(stream.id).get(id);
-    if (!item || (!isVisible(stream, item) && !can(req, stream, 'read'))) fail(404, 'Item not found');
-    send(res, 200, populate(req, stream, [item], url)[0]);
+    const editor = can(req, stream, 'read');
+    if (!item || (!isVisible(stream, item) && !editor)) fail(404, 'Item not found');
+    send(res, 200, populate(req, stream, [editor ? item : publicItem(item)], url)[0]);
   }
 
   async function createItems(req, res, stream) {

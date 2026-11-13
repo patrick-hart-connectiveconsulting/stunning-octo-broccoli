@@ -49,7 +49,9 @@ const unescapeHtml = (s) => s.replace(/&(amp|lt|gt|quot|#39);/g, (m) => ({ '&amp
  * italic, strikethrough, inline code, code blocks, links, images, lists,
  * blockquotes and rules. Raw HTML in the input is escaped, never rendered.
  */
-export function renderMarkdown(md) {
+const MAX_QUOTE_DEPTH = 8;
+
+export function renderMarkdown(md, depth = 0) {
   const src = escapeHtml(String(md ?? '').replace(/\r\n?/g, '\n'));
   const lines = src.split('\n');
   const out = [];
@@ -78,7 +80,9 @@ export function renderMarkdown(md) {
     if (/^&gt;\s?/.test(line)) {
       const quote = [];
       while (i < lines.length && /^&gt;\s?/.test(lines[i])) quote.push(lines[i++].replace(/^&gt;\s?/, ''));
-      out.push(`<blockquote>${renderMarkdown(unescapeHtml(quote.join('\n')))}</blockquote>`);
+      // Nested quotes recurse; beyond a few levels the rest is shown as text (no stack overflow).
+      const inner = depth < MAX_QUOTE_DEPTH ? renderMarkdown(unescapeHtml(quote.join('\n')), depth + 1) : `<p>${quote.join('<br>')}</p>`;
+      out.push(`<blockquote>${inner}</blockquote>`);
       continue;
     }
     const listMatch = /^\s*([-*+]|\d+[.)])\s+/.exec(line);

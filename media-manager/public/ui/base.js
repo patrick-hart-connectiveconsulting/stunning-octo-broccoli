@@ -6,6 +6,7 @@ import {
   escapeHtml, renderMarkdown, markdownToText, truncate, fieldRoles, getPath, formatDate,
   safeUrl, fillPattern, mergeQuery, jsonLdFor, toDate,
 } from './core.js';
+import { openEventStream } from './sse.js';
 
 const streamCache = new Map(); // "<url>|<key>" -> Promise<stream definition>
 
@@ -231,22 +232,30 @@ export class StreamElement extends HTMLElement {
 
   #setupLive() {
     const want = this.hasAttribute('live');
-    const url = `${this.base}/subscribe${this.getAttribute('key') ? `?access_token=${encodeURIComponent(this.getAttribute('key'))}` : ''}`;
-    if (!want || this._sourceUrl !== url) {
+    const key = this.getAttribute('key') || '';
+    const id = `${this.base}|${key}`;
+    if (!want || this._sourceId !== id) {
       this._source?.close();
       this._source = null;
-      this._sourceUrl = null;
+      this._sourceId = null;
     }
     if (!want || this._source) return;
-    const src = new EventSource(url);
     let timer;
     const update = () => {
       clearTimeout(timer);
       timer = setTimeout(() => this.refresh({ quiet: true }), 250);
     };
-    for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset']) src.addEventListener(type, update);
-    this._source = src;
-    this._sourceUrl = url;
+    const types = ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset'];
+    const url = `${this.base}/subscribe`;
+    if (key) {
+      // A key goes in a header (fetch-based client), never in the URL where it would be logged.
+      this._source = openEventStream(url, { headers: { Authorization: `Bearer ${key}` }, onEvent: (type) => { if (types.includes(type)) update(); } });
+    } else {
+      const src = new EventSource(url);
+      for (const type of types) src.addEventListener(type, update);
+      this._source = src;
+    }
+    this._sourceId = id;
   }
 
   #jsonLd() {

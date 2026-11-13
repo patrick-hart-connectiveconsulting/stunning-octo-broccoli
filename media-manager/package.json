@@ -1,6 +1,6 @@
 {
   "name": "media-manager",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "A lightweight, dependency-free media library and data streams API (events, posts, products\u2026) inspired by Strapi",
   "type": "module",

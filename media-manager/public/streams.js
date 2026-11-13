@@ -3,6 +3,7 @@
 
 import { $, h, api, toast, formatDate, debounce, copyText, getToken, initShell } from './common.js';
 import { renderEmbed } from './embed.js';
+import { openEventStream } from './ui/sse.js';
 
 const FIELD_TYPES = [
   ['string', 'Short text'],
@@ -401,23 +402,28 @@ function connectLive() {
   const dot = $('#liveDot');
   dot.className = 'live-dot';
   if (!$('#liveToggle').checked || !state.current) return;
-  // EventSource can't send headers, so editors pass the token as a query param to see drafts.
+  // The token is sent in a header (fetch-based client), not in the URL where it would be logged.
   const token = getToken();
-  const src = new EventSource(`${streamPath()}/subscribe${token ? `?access_token=${encodeURIComponent(token)}` : ''}`);
-  state.source = src;
   const refresh = debounce(async () => {
     await loadStreams();
     if (state.tab === 'items') loadItems();
   }, 300);
-  src.onopen = () => { dot.className = 'live-dot on'; };
-  src.onerror = () => { dot.className = 'live-dot err'; };
-  for (const type of ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset']) src.addEventListener(type, refresh);
-  src.addEventListener('stream-deleted', () => {
-    toast('This stream was deleted', 'error');
-    state.current = null;
-    src.close();
-    loadStreams();
+  const types = ['created', 'updated', 'deleted', 'published', 'unpublished', 'stream-updated', 'reset'];
+  const source = openEventStream(`${streamPath()}/subscribe`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    onOpen: () => { dot.className = 'live-dot on'; },
+    onError: () => { dot.className = 'live-dot err'; },
+    onEvent: (type) => {
+      if (types.includes(type)) refresh();
+      if (type === 'stream-deleted') {
+        toast('This stream was deleted', 'error');
+        state.current = null;
+        source.close();
+        loadStreams();
+      }
+    },
   });
+  state.source = source;
 }
 
 // ---- item dialog -----------------------------------------------------------

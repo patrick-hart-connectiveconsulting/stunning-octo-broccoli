@@ -14,18 +14,28 @@ export function send(res, status, body) {
   res.end(payload);
 }
 
+/**
+ * Reads the request body up to `limit` bytes. A larger body is refused with
+ * 413: reading stops, and the error asks the server to answer and then close
+ * the connection (destroying the socket here would drop the 413 response).
+ */
 export function readBody(req, limit) {
   return new Promise((ok, fail) => {
+    const tooLarge = () => {
+      req.removeAllListeners('data');
+      req.pause();
+      const err = new HttpError(413, `Payload too large (limit ${limit} bytes)`);
+      err.closeConnection = true;
+      fail(err);
+    };
     const declared = Number(req.headers['content-length'] || 0);
-    if (declared > limit) return fail(new HttpError(413, 'Payload too large'));
+    if (declared > limit) return tooLarge();
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
-      if (size > limit) {
-        fail(new HttpError(413, 'Payload too large'));
-        req.destroy();
-      } else chunks.push(c);
+      if (size > limit) tooLarge();
+      else chunks.push(c);
     });
     req.on('end', () => ok(Buffer.concat(chunks)));
     req.on('error', fail);

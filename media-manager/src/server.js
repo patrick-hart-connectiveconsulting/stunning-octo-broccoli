@@ -16,6 +16,20 @@ import { mimeFromExt, fileCategory } from './mime.js';
 const ROOT = resolve(fileURLToPath(import.meta.url), '../..');
 
 const STORED_NAME = /^[a-f0-9]{32}(\.[a-z0-9]{1,10})?$/;
+const ADMIN_PAGES = new Set(['index.html', 'streams.html']);
+const ADMIN_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'", // style attributes set by the UI
+  "img-src 'self' data: blob: https://tile.openstreetmap.org", // map tiles in the Embed preview
+  "media-src 'self' blob:",
+  "connect-src 'self'",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
 // Types a browser could execute as active content if opened from our origin.
 const ACTIVE_CONTENT = new Set(['text/html', 'image/svg+xml', 'application/xml']);
 
@@ -376,6 +390,14 @@ export async function createApp(options = {}) {
     const abs = resolve(config.publicDir, rel);
     if (!abs.startsWith(resolve(config.publicDir) + sep)) throw new HttpError(404, 'Not found');
     const mime = mimeFromExt(extname(abs)) + (/\.(html|css|js)$/.test(abs) ? '; charset=utf-8' : '');
+    if (abs.endsWith('.html')) {
+      // Admin pages hold the main API token in the browser: no framing by other
+      // sites, and scripts only from this server (no inline or third-party code).
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'same-origin');
+      if (ADMIN_PAGES.has(rel)) res.setHeader('Content-Security-Policy', ADMIN_CSP);
+      else res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; object-src 'none'; base-uri 'none'");
+    }
     await serveFile(req, res, abs, { mime });
   }
 
@@ -463,6 +485,11 @@ export async function createApp(options = {}) {
     } catch (err) {
       const status = err.status || 500;
       if (status === 500) console.error(err);
+      if (err.closeConnection && !res.headersSent) {
+        // The rest of the request body is not read: answer, then close the connection.
+        res.setHeader('Connection', 'close');
+        res.on('finish', () => req.destroy());
+      }
       if (!res.headersSent) send(res, status, { error: { status, message: status === 500 ? 'Internal server error' : err.message, ...(err.details ? { details: err.details } : {}) } });
       else res.destroy();
     }
